@@ -1,13 +1,22 @@
-import bpy
 import math
 import os
 import random
 import sys
-from mathutils import Vector, Matrix
+
+import bpy
+from mathutils import Vector
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from g16_geo import (M, S, CUR, Bag, Geo, T, Rx, Ry, Rz, Sc, build_materials, rrect, circle, circle_matching,
+                     round_poly, prism, ring, annulus_top, disk_top, bx, rbox, cylz, cylx, cyly, section, tri,
+                     strip, text_geo, text_lines, pipe_geo, collection, obj, empty, meta, apply_mods, boolean, cut,
+                     in_poly, in_rects, barcode, datamatrix, shade)
+import g16_parts as P
+from g16_layout import BOARD, BOTTOM, TOP, VRM_CPU, VRM_GPU, MOUNTS, IC_MARKS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ARGV = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
-S = 0.001
 
 W, D = 356.98, 288.73
 YF, YR = -D / 2, D / 2
@@ -27,10 +36,16 @@ LT = 6.4
 LL = YP - YF + 0.2
 ACT_W, ACT_H = 344.68, 215.42
 FAN_Y = 90.0
-FAN_X = 118.0
-FAN_R = 39.0
-
-random.seed(7630)
+FAN_X = 119.5
+ZT, ZB = 11.8, 10.6
+REAR_Z = 13.5
+REAR_PORTS = [("usbc", -40.0), ("usba", -15.0), ("hdmi", 12.0), ("dc", 42.0)]
+LEFT_RJ45 = (25.0, 10.2)
+LEFT_AUDIO = (-40.0, 9.5)
+RIGHT_USB = [(0.0, 10.0), (22.0, 10.0)]
+SCREWS = [(-168, -134), (168, -134), (-168, -20), (168, -20), (-168, 134), (168, 134),
+          (-60, -134), (60, -134), (-60, 134), (60, 134)]
+RNG = random.Random(7630)
 
 
 def zdeck(y):
@@ -40,370 +55,86 @@ def zdeck(y):
 ZP = zdeck(YP) + LT / 2
 
 
-def lin(h):
-    h = h.lstrip("#")
-    c = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
-    return [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+def top_m(x, y, rot=0.0):
+    return T(x, y, ZT) @ Rz(rot)
 
 
-M = {}
+def bot_m(x, y, rot=0.0):
+    return T(x, y, ZB) @ Ry(math.pi) @ Rz(rot)
 
 
-def make_mat(key, name, hexc, metal=0.0, rough=0.5, emit=None, strength=0.0, coat=0.0):
-    m = bpy.data.materials.new(name)
-    if m.node_tree is None:
-        m.use_nodes = True
-    nt = m.node_tree
-    bsdf = next((n for n in nt.nodes if n.type == "BSDF_PRINCIPLED"), None)
-    c = lin(hexc)
-    bsdf.inputs["Base Color"].default_value = (*c, 1)
-    bsdf.inputs["Metallic"].default_value = metal
-    bsdf.inputs["Roughness"].default_value = rough
-    if coat:
-        bsdf.inputs["Coat Weight"].default_value = coat
-        bsdf.inputs["Coat Roughness"].default_value = 0.08
-    if emit:
-        bsdf.inputs["Emission Color"].default_value = (*lin(emit), 1)
-        bsdf.inputs["Emission Strength"].default_value = strength
-    m.diffuse_color = (*c, 1)
-    m.metallic = metal
-    m.roughness = rough
-    M[key] = m
-    return m
+BOT_FLAT = T(0, 0, ZB) @ Sc(1, 1, -1)
+TOP_FLAT = T(0, 0, ZT)
 
 
-def build_materials():
-    make_mat("shell", "MAT_Shell_Nightshade", "#25272d", 0.4, 0.44)
-    make_mat("bottom", "MAT_Shell_Bottom", "#1c1e22", 0.2, 0.6)
-    make_mat("plastic", "MAT_Plastic_Black", "#121317", 0.0, 0.6)
-    make_mat("bezel", "MAT_Bezel_Black", "#0c0d10", 0.0, 0.7)
-    make_mat("vent", "MAT_Vent_Black", "#060708", 0.0, 0.9)
-    make_mat("keycap", "MAT_Keycap", "#17181c", 0.0, 0.55)
-    make_mat("legend", "MAT_Key_Legend", "#8fdcff", 0.0, 0.4, "#8fdcff", 4.0)
-    make_mat("kbplate", "MAT_Keyboard_Plate", "#2a2c31", 0.6, 0.45)
-    make_mat("touchpad", "MAT_Touchpad_Glass", "#1b1c21", 0.0, 0.3, coat=0.6)
-    make_mat("pcb", "MAT_PCB", "#0f3a29", 0.0, 0.58)
-    make_mat("gold", "MAT_Gold", "#d6a84a", 1.0, 0.25)
-    make_mat("copper", "MAT_Copper", "#c27a4a", 1.0, 0.28)
-    make_mat("alu", "MAT_Aluminum", "#b9bdc4", 1.0, 0.35)
-    make_mat("steel", "MAT_Steel", "#8b8f97", 1.0, 0.38)
-    make_mat("silicon", "MAT_Silicon_Die", "#3c4250", 0.8, 0.15)
-    make_mat("substrate", "MAT_Substrate", "#2f5a3c", 0.0, 0.5)
-    make_mat("chip", "MAT_Chip_Black", "#151517", 0.0, 0.45)
-    make_mat("smd", "MAT_SMD", "#6b5a45", 0.0, 0.5)
-    make_mat("choke", "MAT_Choke", "#4a4c52", 0.3, 0.5)
-    make_mat("battery", "MAT_Battery_Wrap", "#18191c", 0.0, 0.5)
-    make_mat("label", "MAT_Label", "#d9dadc", 0.0, 0.6)
-    make_mat("labeltext", "MAT_Label_Text", "#202124", 0.0, 0.6)
-    make_mat("rubber", "MAT_Rubber", "#0d0d0e", 0.0, 0.85)
-    make_mat("fpc", "MAT_Flex_Cable", "#c8792a", 0.0, 0.45)
-    make_mat("zif", "MAT_Connector_White", "#e6e1d3", 0.0, 0.6)
-    make_mat("fan", "MAT_Fan_Plastic", "#141519", 0.0, 0.5)
-    make_mat("screen", "MAT_Screen", "#0a0f1a", 0.0, 0.2, "#16243a", 1.0)
-    make_mat("panelback", "MAT_Panel_Back", "#9aa0a8", 0.8, 0.4)
-    make_mat("lens", "MAT_Lens", "#050608", 0.0, 0.05)
-    make_mat("chrome", "MAT_Logo_Chrome", "#d8dbe0", 1.0, 0.12)
-    make_mat("portin", "MAT_Port_Inner", "#2b2f38", 0.0, 0.5)
-    make_mat("cableblack", "MAT_Cable_Black", "#101010", 0.0, 0.6)
-    make_mat("cablegrey", "MAT_Cable_Grey", "#9a9a9a", 0.0, 0.6)
-    make_mat("speaker", "MAT_Speaker_Mesh", "#2c2e33", 0.5, 0.6)
-    make_mat("led", "MAT_LED", "#ffffff", 0.0, 0.3, "#ffffff", 6.0)
-
-
-class Geo:
-    def __init__(self):
-        self.v = []
-        self.f = []
-
-    def add(self, verts, faces, m=None):
-        o = len(self.v)
-        for p in verts:
-            p = Vector(p)
-            if m is not None:
-                p = m @ p
-            self.v.append(p)
-        for fc in faces:
-            self.f.append([i + o for i in fc])
-        return self
-
-    def merge(self, g, m=None):
-        return self.add(g.v, g.f, m)
-
-
-def T(x, y, z):
-    return Matrix.Translation((x, y, z))
-
-
-def Rx(a):
-    return Matrix.Rotation(a, 4, "X")
-
-
-def Ry(a):
-    return Matrix.Rotation(a, 4, "Y")
-
-
-def Rz(a):
-    return Matrix.Rotation(a, 4, "Z")
-
-
-def rrect(cx, cy, w, d, r, seg=6):
-    r = max(0.0, min(r, w / 2 - 1e-4, d / 2 - 1e-4))
-    if r <= 1e-6:
-        seg, r = 0, 0.0
-    corners = [(cx + w / 2 - r, cy - d / 2 + r, -90), (cx + w / 2 - r, cy + d / 2 - r, 0),
-               (cx - w / 2 + r, cy + d / 2 - r, 90), (cx - w / 2 + r, cy - d / 2 + r, 180)]
-    pts = []
-    for ox, oy, a0 in corners:
-        for i in range(seg + 1):
-            a = math.radians(a0 + (90 * i / seg if seg else 0))
-            pts.append((ox + r * math.cos(a), oy + r * math.sin(a)))
-    return pts
-
-
-def circle(cx, cy, r, n=24):
-    return [(cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
-
-
-def circle_matching(loop, cx, cy, r):
-    out = []
-    for x, y in loop:
-        a = math.atan2(y - cy, x - cx)
-        out.append((cx + r * math.cos(a), cy + r * math.sin(a)))
-    return out
-
-
-def prism(loop, z0, z1=None, top_loop=None, ztop=None):
-    n = len(loop)
-    tl = top_loop or loop
-    verts = [(x, y, z0) for x, y in loop]
-    verts += [(x, y, ztop(x, y) if ztop else z1) for x, y in tl]
-    faces = [list(range(n - 1, -1, -1)), list(range(n, 2 * n))]
-    for i in range(n):
-        j = (i + 1) % n
-        faces.append([i, j, n + j, n + i])
-    return Geo().add(verts, faces)
-
-
-def ring(outer, inner, z0, z1):
-    n = len(outer)
-    verts = [(x, y, z0) for x, y in outer] + [(x, y, z1) for x, y in outer]
-    verts += [(x, y, z0) for x, y in inner] + [(x, y, z1) for x, y in inner]
-    ob, ot, ib, it = 0, n, 2 * n, 3 * n
-    faces = []
-    for i in range(n):
-        j = (i + 1) % n
-        faces.append([ob + i, ob + j, ot + j, ot + i])
-        faces.append([ib + j, ib + i, it + i, it + j])
-        faces.append([ot + i, ot + j, it + j, it + i])
-        faces.append([ob + j, ob + i, ib + i, ib + j])
-    return Geo().add(verts, faces)
-
-
-def bx(x0, x1, y0, y1, z0, z1):
-    return prism([(x1, y0), (x1, y1), (x0, y1), (x0, y0)], z0, z1)
-
-
-def rbox(cx, cy, w, d, z0, z1, r=0.0, seg=3):
-    return prism(rrect(cx, cy, w, d, r, seg), z0, z1)
-
-
-def cylz(cx, cy, z0, z1, r, n=24):
-    return prism(circle(cx, cy, r, n), z0, z1)
-
-
-def cylx(x0, x1, cy, cz, r, n=24):
-    return Geo().merge(prism(circle(-cz, cy, r, n), x0, x1), Ry(math.pi / 2))
-
-
-def cyly(y0, y1, cx, cz, r, n=24):
-    return Geo().merge(prism(circle(cx, -cz, r, n), y0, y1), Rx(-math.pi / 2))
-
-
-def tri(cx, cy, z, s, ang):
-    pts = [(0, s * 0.6), (-s * 0.55, -s * 0.4), (s * 0.55, -s * 0.4)]
-    m = T(cx, cy, z) @ Rz(ang)
-    return Geo().add([(x, y, 0) for x, y in pts], [[0, 1, 2]], m)
-
-
-def scene_link(ob):
-    bpy.context.scene.collection.objects.link(ob)
-
-
-def text_geo(s, size):
-    cu = bpy.data.curves.new("tmp_txt", "FONT")
-    cu.body = s
-    cu.size = size
-    cu.align_x = "CENTER"
-    cu.align_y = "CENTER"
-    cu.resolution_u = 3
-    ob = bpy.data.objects.new("tmp_txt", cu)
-    scene_link(ob)
-    dg = bpy.context.evaluated_depsgraph_get()
-    me = bpy.data.meshes.new_from_object(ob.evaluated_get(dg))
-    g = Geo().add([v.co.copy() for v in me.vertices], [list(p.vertices) for p in me.polygons])
-    bpy.data.objects.remove(ob)
-    bpy.data.curves.remove(cu)
-    bpy.data.meshes.remove(me)
-    return g
-
-
-def rounded_path(pts, rad, n=6):
-    out = [pts[0]]
-    for i in range(1, len(pts) - 1):
-        p0, p1, p2 = (Vector((*pts[k], 0)) for k in (i - 1, i, i + 1))
-        a, b = p0 - p1, p2 - p1
-        d = min(rad, a.length / 2, b.length / 2)
-        s, e = p1 + a.normalized() * d, p1 + b.normalized() * d
-        for k in range(n + 1):
-            t = k / n
-            q = (1 - t) ** 2 * s + 2 * (1 - t) * t * p1 + t ** 2 * e
-            out.append((q.x, q.y))
-    out.append(pts[-1])
-    return out
-
-
-def pipe_geo(pts2d, z, r, flatten=1.0, corner=10.0):
-    pts = rounded_path(pts2d, corner)
-    cu = bpy.data.curves.new("tmp_pipe", "CURVE")
-    cu.dimensions = "3D"
-    sp = cu.splines.new("POLY")
-    sp.points.add(len(pts) - 1)
-    for i, (x, y) in enumerate(pts):
-        sp.points[i].co = (x, y, z, 1)
-    cu.bevel_depth = r
-    cu.bevel_resolution = 3
-    cu.use_fill_caps = True
-    ob = bpy.data.objects.new("tmp_pipe", cu)
-    scene_link(ob)
-    dg = bpy.context.evaluated_depsgraph_get()
-    me = bpy.data.meshes.new_from_object(ob.evaluated_get(dg))
-    verts = [Vector((v.co.x, v.co.y, z + (v.co.z - z) * flatten)) for v in me.vertices]
-    g = Geo().add(verts, [list(p.vertices) for p in me.polygons])
-    bpy.data.objects.remove(ob)
-    bpy.data.curves.remove(cu)
-    bpy.data.meshes.remove(me)
-    return g
-
-
-CUR = {"col": None}
-
-
-def collection(name):
-    c = bpy.data.collections.new(name)
-    bpy.context.scene.collection.children.link(c)
-    CUR["col"] = c
-    return c
-
-
-def shade(me, angle=32):
-    me.shade_smooth()
-    me.set_sharp_from_angle(angle=math.radians(angle))
-
-
-def obj(name, geo, mat, parent=None, smooth=False, angle=32):
-    me = bpy.data.meshes.new(name)
-    me.from_pydata([tuple(p * S) for p in geo.v], [], geo.f)
-    me.validate()
-    me.update()
-    me.materials.append(mat)
-    ob = bpy.data.objects.new(name, me)
-    CUR["col"].objects.link(ob)
-    if parent is not None:
-        ob.parent = parent
-    if smooth:
-        shade(me, angle)
-    return ob
-
-
-def empty(name, loc=(0, 0, 0), rot=(0, 0, 0), parent=None):
-    ob = bpy.data.objects.new(name, None)
-    ob.empty_display_type = "PLAIN_AXES"
-    ob.empty_display_size = 0.02
-    ob.location = Vector(loc) * S
-    ob.rotation_euler = rot
-    CUR["col"].objects.link(ob)
-    if parent is not None:
-        ob.parent = parent
-    return ob
-
-
-def meta(ob, label=None, info=None, explode=None, layer=None):
-    if label:
-        ob["label"] = label
-    if info:
-        ob["info"] = info
-    if explode is not None:
-        ob["explode"] = [e * S for e in explode]
-    if layer is not None:
-        ob["layer"] = layer
-    return ob
-
-
-def apply_mods(ob):
-    dg = bpy.context.evaluated_depsgraph_get()
-    me = bpy.data.meshes.new_from_object(ob.evaluated_get(dg))
-    old = ob.data
-    ob.modifiers.clear()
-    ob.data = me
-    bpy.data.meshes.remove(old)
-
-
-def boolean(target, cutter, op):
-    md = target.modifiers.new("bool_" + cutter.name, "BOOLEAN")
-    md.operation = op
-    md.object = cutter
-    md.solver = "EXACT"
-    cutter.hide_render = True
-    cutter.display_type = "WIRE"
+def down_text(lines, size, x, y, z):
+    return Geo().merge(text_lines(lines, size, 0.0), T(x, y, z) @ Ry(math.pi))
 
 
 def build_bottom_cover():
     collection("COL_BottomCover")
     g = meta(empty("GRP_BottomCover"), "Bottom cover (D-cover)",
-             "Base panel with fan intakes, rubber feet and 10 captive screws.", (0, 0, 0), 0)
+             "Base panel with perforated fan intakes, rubber feet and 10 captive screws.", (0, 0, 0), 0)
     loop = rrect(0, 0, W, D, CR)
-    shell = prism(loop, 0, 1.6)
-    shell.merge(ring(loop, rrect(0, 0, W - 2 * WALL, D - 2 * WALL, CR - WALL), 1.6, 5.0))
-    obj("SM_BottomCover_Shell", shell, M["bottom"], g, smooth=True)
-
-    vents = Geo()
+    plate = obj("SM_BottomCover_Plate", prism(loop, 0, 1.6), M["bottom"], g)
+    holes = []
     for fx in (-FAN_X, FAN_X):
-        for row in range(-8, 9):
-            y = FAN_Y + row * 4.2
-            off = 5.0 if row % 2 else 0.0
-            for col in range(-4, 5):
-                x = fx + col * 10.0 + off
-                if (x - fx) ** 2 + (y - FAN_Y) ** 2 < 33.0 ** 2:
-                    vents.merge(rbox(x, y, 8.0, 1.8, -0.12, 1.75, 0.9, 2))
-    for row in range(14):
-        y = 58 + row * 4.2
-        off = 5.0 if row % 2 else 0.0
-        for col in range(-6, 7):
-            vents.merge(rbox(col * 10.0 + off, y, 8.0, 1.8, -0.12, 1.75, 0.9, 2))
-    obj("SM_BottomCover_Vents", vents, M["vent"], g)
-
-    feet = rbox(0, -128, 300, 7, -1.0, 0.05, 3.4, 4)
-    feet.merge(rbox(0, 131, 300, 8, -1.6, 0.05, 3.9, 4))
-    obj("SM_BottomCover_Feet", feet, M["rubber"], g, smooth=True)
-
-    screws = Geo()
-    recess = Geo()
-    for x, y in [(-168, -134), (168, -134), (-168, -20), (168, -20), (-168, 134), (168, 134),
-                 (-60, -134), (60, -134), (-60, 134), (60, 134)]:
-        screws.merge(cylz(x, y, -0.25, 0.05, 2.4, 20))
-        recess.merge(bx(x - 1.4, x + 1.4, y - 0.25, y + 0.25, -0.32, -0.2))
-        recess.merge(bx(x - 0.25, x + 0.25, y - 1.4, y + 1.4, -0.32, -0.2))
-    obj("SM_BottomCover_Screws", screws, M["steel"], g, smooth=True)
-    obj("SM_BottomCover_ScrewRecess", recess, M["vent"], g)
-
-    lab = rbox(0, -40, 62, 26, -0.12, 0.0, 2.0, 3)
-    obj("SM_BottomCover_Label", lab, M["label"], g)
-    txt = Geo()
-    for i, (s, size) in enumerate([("DELL  G16 7630", 3.6), ("Model P223F  ·  Reg. Type P223F001", 2.0),
-                                   ("Input 20V  16.5A", 2.0)]):
-        txt.merge(text_geo(s, size), T(0, -32 - i * 6.5, -0.14) @ Rx(math.pi))
-    obj("SM_BottomCover_LabelText", txt, M["labeltext"], g)
+        for row in range(-9, 10):
+            y = FAN_Y + row * 3.4
+            off = 2.4 if row % 2 else 0.0
+            for col in range(-8, 9):
+                x = fx + col * 4.8 + off
+                if (x - fx) ** 2 + (y - FAN_Y) ** 2 < 32.0 ** 2:
+                    holes.append(rbox(x, y, 3.6, 1.7, -1.0, 3.0, 0.85, 2))
+    for row in range(16):
+        y = 56 + row * 3.4
+        off = 2.4 if row % 2 else 0.0
+        for col in range(-12, 13):
+            holes.append(rbox(col * 4.8 + off, y, 3.6, 1.7, -1.0, 3.0, 0.85, 2))
+    for sx in (-1, 1):
+        for row in range(9):
+            for col in range(4):
+                holes.append(cylz(sx * (156 + col * 3.2), -118 + row * 3.2 + (1.6 if col % 2 else 0), -1.0, 3.0, 1.0, 8))
+    cut(plate, holes)
+    shade(plate.data, 30)
+    lip = ring(loop, rrect(0, 0, W - 2 * WALL, D - 2 * WALL, CR - WALL), 1.6, 5.0)
+    obj("SM_BottomCover_Lip", lip, M["bottom"], g, smooth=True)
+    inner = Bag()
+    for x, y in SCREWS:
+        inner.add("bottom", ring(circle(x, y, 3.0, 20), circle(x, y, 1.2, 20), 1.6, 5.0))
+    for x in range(-150, 151, 50):
+        inner.add("bottom", bx(x - 0.5, x + 0.5, -125, -60, 1.6, 1.95))
+    for y in (-125, -60):
+        inner.add("bottom", bx(-150, 150, y - 0.5, y + 0.5, 1.6, 1.95))
+    inner.add("mylar", rbox(0, -97, 280, 60, 1.6, 1.7, 3.0))
+    inner.emit("SM_BottomCover_Inner", g)
+    feet = Bag()
+    feet.add("rubber", prism(rrect(0, -128, 298, 5.4, 2.6, 4), -1.0, 0.05, top_loop=rrect(0, -128, 300, 7, 3.4, 4)))
+    feet.add("rubber", prism(rrect(0, 131, 298, 6.2, 3.0, 4), -1.6, 0.05, top_loop=rrect(0, 131, 300, 8, 3.9, 4)))
+    feet.emit("SM_BottomCover_Feet", g, smooth=("rubber",))
+    scr = Bag()
+    for x, y in SCREWS:
+        scr.put(P.screw(2.4, 0.3), T(x, y, 0.05) @ Ry(math.pi))
+    scr.emit("SM_BottomCover_Screws", g, smooth=("steel",))
+    lab = Bag()
+    lab.add("label", rbox(0, -40, 66, 30, -0.12, 0.0, 2.0, 3))
+    lab.add("labeltext", down_text(["DELL  G16 7630", "Input: 20V ⎓ 12A / 16.5A", "Made in China"],
+                                   [2.6, 1.6, 1.6], 8.0, -34.5, -0.13))
+    lab.add("labeltext", Geo().merge(barcode(RNG, -26, -2.0, 40, 4.0, 0.0), T(4, -47.0, -0.13) @ Ry(math.pi)))
+    lab.add("labeltext", Geo().merge(datamatrix(RNG, 0, 0, 9.0, 0.0, 14), T(-22.0, -34.5, -0.13) @ Ry(math.pi)))
+    lab.emit("SM_BottomCover_Label", g)
     return g
+
+
+def thermal_bracket(bag, cx, cy, ex, ey, start_num):
+    for k, (sx, sy) in enumerate(((-1, 1), (1, 1), (1, -1), (-1, -1))):
+        tx, ty = cx + sx * ex, cy + sy * ey
+        v = Vector((tx - cx, ty - cy, 0))
+        bag.add("blacksteel", bx(0, v.length, -3.2, 3.2, 3.8, 4.3), T(cx, cy, 0) @ Rz(math.atan2(v.y, v.x)))
+        bag.add("blacksteel", cylz(tx, ty, 3.8, 4.3, 4.0, 20))
+        bag.put(P.spring_screw(2.2), T(tx, ty, 3.8) @ Ry(math.pi))
+        bag.add("silk", Geo().merge(text_geo(str(start_num + k), 2.2), T(tx + sx * -5.0, ty, 3.79) @ Ry(math.pi)))
+    bag.add("blacksteel", rbox(cx, cy, 16, 16, 3.8, 4.3, 3.0))
 
 
 def build_thermal():
@@ -411,41 +142,28 @@ def build_thermal():
     g = meta(empty("GRP_Thermal"), "Thermal module",
              "Six flattened copper heat pipes feed four aluminum fin stacks: two at the rear and one on each side.",
              (0, 0, GAP), 1)
-    for side, fx in (("L", -FAN_X), ("R", FAN_X)):
-        f = meta(empty("GRP_Fan_" + side, parent=g), ("Left" if side == "L" else "Right") + " fan",
-                 "Blower fan. Pulls air in through the bottom cover and keyboard grille, pushes it through the fins.")
-        outer = rrect(fx, FAN_Y, 80, 80, 16, 4)
-        housing = ring(outer, circle_matching(outer, fx, FAN_Y, 24), 2.2, 2.8)
-        housing.merge(ring(outer, rrect(fx, FAN_Y, 77.6, 77.6, 14.8, 4), 2.8, 14.4))
-        obj("SM_Fan_" + side + "_Housing", housing, M["fan"], f, smooth=True)
-        top = ring(outer, circle_matching(outer, fx, FAN_Y, 27), 14.4, 15.0)
-        obj("SM_Fan_" + side + "_Cover", top, M["alu"], f, smooth=True)
-        imp = cylz(fx, FAN_Y, 3.4, 13.6, 13.0, 32)
-        imp.merge(ring(circle(fx, FAN_Y, 33.5, 48), circle(fx, FAN_Y, 30.5, 48), 13.0, 13.4))
-        for i in range(41):
-            a = 2 * math.pi * i / 41
-            imp.merge(bx(-9.75, 9.75, -0.25, 0.25, 3.6, 13.4),
-                      T(fx, FAN_Y, 0) @ Rz(a) @ T(23.75, 0, 0) @ Rz(math.radians(28)))
-        obj("SM_Fan_" + side + "_Impeller", imp, M["fan"], f)
-        hub = cylz(fx, FAN_Y, 13.6, 13.7, 9.0, 32)
-        obj("SM_Fan_" + side + "_HubLabel", hub, M["label"], f, smooth=True)
-
+    cable = Bag()
+    for k, w in enumerate(("wirered", "cableblack", "wireyellow", "wireblue")):
+        o = (k - 1.5) * 0.7
+        cable.add(w, pipe_geo([(37.0, -14.0 + o, 8.0), (33.0, -30.0 + o, 8.4), (29.4 + o, -40.0, 8.8),
+                               (29.4 + o, -43.5, 8.8)], 0.3, 1.0, 3.0, 1))
+    cable.put(P.plug(4, 0.7, ("cablegrey",)), T(29.5, -44.6, 6.4))
+    for side, sx in (("L", -1), ("R", 1)):
+        f = meta(empty("GRP_Fan_" + side, parent=g), ("Left" if sx < 0 else "Right") + " fan",
+                 "Dual-outlet blower: 47 curved blades, aluminum cover, exhausts into the rear and side fin stacks.")
+        housing, imp = P.fan(RNG, ["DELL", "DC 5V 0.50A", "DFS5K12114363J", "FN4R"])
+        m = T(sx * FAN_X, FAN_Y, 0) @ (Sc(-1, 1, 1) if sx > 0 else Sc(1, 1, 1))
+        Bag().put(housing, m).emit("SM_Fan_" + side + "_Housing", f, smooth=("alu", "steel"))
+        Bag().put(imp, m).emit("SM_Fan_" + side + "_Impeller", f)
+        Bag().put(cable, m).emit("SM_Fan_" + side + "_Cable", f, smooth=("wirered", "cableblack", "wireyellow", "wireblue"))
     fins = Geo()
     for sx in (-1, 1):
-        x = 80.0
-        while x < 156.0:
-            fins.merge(bx(sx * x - 0.1, sx * x + 0.1, 131.0, 141.0, 2.6, 22.6))
-            x += 1.3
-        fins.merge(bx(min(sx * 80, sx * 156), max(sx * 80, sx * 156), 131.0, 141.0, 2.3, 2.6))
-        y = 58.0
-        while y < 124.0:
-            fins.merge(bx(min(sx * 159, sx * 172), max(sx * 159, sx * 172), y - 0.1, y + 0.1, 2.6, 15.6))
-            y += 1.3
-        fins.merge(bx(min(sx * 159, sx * 172), max(sx * 159, sx * 172), 58.0, 124.0, 2.3, 2.6))
-    meta(obj("SM_FinStacks", fins, M["alu"], g), "Fin stacks",
-         "Aluminum fins behind the rear and side exhaust vents.")
-
-    pz, pr = 5.9, 2.5
+        a, b = sorted((sx * 80.0, sx * 156.0))
+        fins.merge(P.fin_stack(a, b, 131.0, 141.0, 2.6, 22.6, "x"))
+        a, b = sorted((sx * 161.0, sx * 172.0))
+        fins.merge(P.fin_stack(a, b, 58.0, 124.0, 2.6, 15.6, "y"))
+    meta(obj("SM_FinStacks", fins, M["alu"], g), "Fin stacks", "Aluminum fins behind the rear and side exhaust vents.")
+    z = 5.4
     paths = [
         [(-30, 34), (-62, 34), (-72, 44), (-72, 120), (-82, 134), (-156, 134)],
         [(-35, 28), (-60, 28), (-66, 36), (-66, 124), (-78, 139.5), (-156, 139.5)],
@@ -456,28 +174,38 @@ def build_thermal():
     ]
     pipes = Geo()
     for p in paths:
-        pipes.merge(pipe_geo(p, pz, pr, 0.6, 9.0))
+        pipes.merge(pipe_geo([(x, y, z) for x, y in p], 2.5, 0.4, 9.0, 3))
     meta(obj("SM_HeatPipes", pipes, M["copper"], g, smooth=True, angle=60), "Heat pipes",
          "Six flattened copper heat pipes carry heat from both cold plates to the fin stacks.")
-
-    meta(obj("SM_ColdPlate_CPU", rbox(-45, 30, 46, 36, 7.4, 8.9, 2.0), M["copper"], g, smooth=True),
-         "CPU cold plate", "Copper contact plate over the processor die.")
-    meta(obj("SM_ColdPlate_GPU", rbox(40, 32, 74, 48, 7.4, 8.9, 3.0), M["copper"], g, smooth=True),
-         "GPU cold plate", "Copper plate covering the GPU die and the four GDDR6 chips.")
-
-    br = Geo()
-    heads = Geo()
-    for cx, cy, ex, ey in ((-45, 30, 28, 24), (40, 32, 34, 26)):
-        for sx in (-1, 1):
-            for sy in (-1, 1):
-                tx, ty = cx + sx * ex, cy + sy * ey
-                v = Vector((tx - cx, ty - cy, 0))
-                br.merge(bx(0, v.length, -3.0, 3.0, 3.2, 3.8), T(cx, cy, 0) @ Rz(math.atan2(v.y, v.x)))
-                heads.merge(cylz(tx, ty, 2.6, 3.8, 2.6, 20))
-        br.merge(rbox(cx, cy, 14, 14, 3.2, 3.8, 3.0))
-    meta(obj("SM_RetentionBrackets", br, M["steel"], g), "Retention brackets",
-         "Spring-steel brackets that press the cold plates onto the CPU and GPU.")
-    obj("SM_RetentionScrews", heads, M["steel"], g, smooth=True)
+    cpu = meta(empty("GRP_ColdPlate_CPU", parent=g), "CPU cold plate",
+               "Copper plate with a machined pedestal and thermal paste over the processor die.")
+    b = Bag()
+    b.add("copper", rbox(-45, 30, 48, 38, 6.4, 7.9, 2.0, 4))
+    b.add("copperdark", rbox(-45, 30, 26, 13, 7.9, 8.28, 0.6, 3))
+    b.add("paste", rbox(-45, 30, 23, 10, 8.28, 8.3, 0.4, 3))
+    thermal_bracket(b, -45, 30, 30, 24, 1)
+    b.emit("SM_ColdPlate_CPU", cpu, smooth=("copper",))
+    gpu = meta(empty("GRP_ColdPlate_GPU", parent=g), "GPU cold plate",
+               "Copper plate over the GPU die with thermal pads on the four GDDR6 chips.")
+    b = Bag()
+    b.add("copper", rbox(40, 32, 76, 50, 6.4, 7.9, 3.0, 4))
+    b.add("copperdark", rbox(40, 32, 15, 15, 7.9, 8.18, 0.6, 3))
+    b.add("paste", rbox(40, 32, 12, 12, 8.18, 8.2, 0.4, 3))
+    for k in ("VRAM1", "VRAM2", "VRAM3", "VRAM4"):
+        cx, cy, w, d, _ = BOTTOM[k]
+        b.add("thermalpad", rbox(cx, cy, w + 0.6, d + 0.6, 7.9, 9.2, 0.4, 2))
+    thermal_bracket(b, 40, 32, 34, 26, 5)
+    b.emit("SM_ColdPlate_GPU", gpu, smooth=("copper",))
+    vrm = meta(empty("GRP_VRM_Plates", parent=g), "VRM heat spreaders",
+               "Aluminum plates with pink thermal pads pressed onto the CPU and GPU power stages.")
+    b = Bag()
+    b.add("alu", rbox(-46, 61, 62, 16, 5.6, 6.0, 1.5))
+    b.add("thermalpink", rbox(-46, 58, 58, 8, 6.0, 6.6, 0.5))
+    b.add("thermalpink", rbox(-46, 66.5, 32, 6, 6.0, 9.7, 0.5))
+    b.add("alu", rbox(40, 64, 56, 16, 5.6, 6.0, 1.5))
+    b.add("thermalpink", rbox(40, 61, 52, 8, 6.0, 6.6, 0.5))
+    b.add("thermalpink", rbox(40, 69.5, 52, 6, 6.0, 9.7, 0.5))
+    b.emit("SM_VRM_Plates", vrm)
     return g
 
 
@@ -485,218 +213,392 @@ def build_battery_audio():
     collection("COL_Battery")
     g = meta(empty("GRP_Battery"), "Battery",
              "Li-ion pack, 56 Wh 3-cell or 86 Wh 6-cell. 295.2 × 77.7 × 7.56 mm.", (0, 0, 2 * GAP), 2)
-    obj("SM_Battery_Body", rbox(0, -97.5, 295.2, 77.7, 2.0, 9.56, 3.0, 4), M["battery"], g, smooth=True)
-    obj("SM_Battery_Label", rbox(-40, -97.5, 130, 40, 9.56, 9.62, 2.0, 3), M["label"], g)
-    txt = Geo()
-    for i, (s, size) in enumerate([("DELL", 5.0), ("6-CELL  86Wh  LI-ION", 3.0), ("11.4V  ·  7.5Ah", 2.6)]):
-        txt.merge(text_geo(s, size), T(-40, -86 - i * 9.0, 9.64))
-    obj("SM_Battery_LabelText", txt, M["labeltext"], g)
-    plug = rbox(0, -56.9, 20, 3.6, 7.8, 9.6, 0.4)
-    obj("SM_Battery_Plug", plug, M["zif"], g)
-    wires = Geo()
+    b = Bag()
+    b.add("plastic", rbox(0, -97.5, 295.2, 77.7, 2.0, 2.8, 3.0, 4))
     for i in range(6):
-        wires.merge(cyly(-58.7, -57.0, -6.25 + i * 2.5, 8.7, 0.6, 10))
-    obj("SM_Battery_Wires", wires, M["cableblack"], g, smooth=True)
-
+        x = -120.0 + i * 48.0
+        b.add("battery", prism(rrect(x, -99.0, 45.5, 72.0, 2.5, 4), 2.8, 9.56,
+                               top_loop=rrect(x, -99.0, 43.5, 70.0, 2.0, 4)))
+    b.add("pcbdark", rbox(0, -62.0, 70, 5.5, 2.8, 3.6, 0.5))
+    for i, x in enumerate((-28, -16, 8, 22)):
+        b.put(P.qfn(3.0, 3.0, 0.8, 4, 4), T(x, -62.0, 3.6))
+    for x in range(-32, 33, 4):
+        b.put(P.passive("0603", "mlcc"), T(x, -60.4, 3.6))
+    b.add("kapton", rbox(0, -62.0, 72, 6.5, 3.62, 3.66, 0.6))
+    b.add("label", rbox(-20, -99.0, 150, 50, 9.56, 9.62, 2.0, 3))
+    b.add("labeltext", Geo().merge(text_lines(["DELL", "Li-ion Battery  86Wh  11.4V ⎓ 7.25Ah",
+                                               "Type: M01WR   DP/N 0WM3J3", "Do not puncture, crush or heat above 60°C"],
+                                              [5.0, 2.4, 2.0, 1.6], 0.0), T(-38, -94.0, 9.63)))
+    b.add("labeltext", barcode(RNG, -88, -120.0, 70, 6.0, 9.625))
+    b.add("labeltext", datamatrix(RNG, 42, -108, 11.0, 9.625, 14))
+    for i in range(3):
+        b.add("labeltext", tri(20 + i * 12, -84.0, 9.63, 7.0, 0.0))
+        b.add("label", Geo().merge(text_geo("!", 3.0), T(20 + i * 12, -84.6, 9.64)))
+    for x in (-120, -40, 40, 120):
+        b.add("plastic", rbox(x, -56.6, 9, 5, 5.8, 6.6, 1.5))
+        b.put(P.screw(1.6, 0.6), T(x, -56.6, 6.6))
+    b.put(P.plug(6, 1.0, ("wirered", "cableblack")), T(0, -56.0, 7.8) @ Rz(math.pi))
+    b.emit("SM_Battery", g, smooth=("battery", "steel"))
     a = meta(empty("GRP_Speakers"), "Speakers", "Stereo speaker pair, down-firing through the bottom cover.",
              (0, 0, 2 * GAP), 2)
     for side, sx in (("L", -1), ("R", 1)):
-        sp = rbox(sx * 162, -100, 22, 55, 2.0, 11.0, 4.0, 4)
-        o = obj("SM_Speaker_" + side, sp, M["plastic"], a, smooth=True)
-        meta(o, ("Left" if sx < 0 else "Right") + " speaker", "Sealed speaker box with a down-firing driver.")
-        obj("SM_Speaker_" + side + "_Grille", rbox(sx * 162, -100, 14, 40, 1.9, 2.0, 3.0, 3), M["speaker"], o)
-        w = cyly(-72.5, -60, sx * 158, 8.0, 0.7, 10)
-        w.merge(cyly(-72.5, -60, sx * 160, 8.0, 0.7, 10))
-        obj("SM_Speaker_" + side + "_Wire", w, M["cableblack"], o, smooth=True)
+        x = sx * 162
+        o = meta(obj("SM_Speaker_" + side, rbox(x, -100, 22, 55, 3.0, 11.0, 4.0, 4, inset=0.4), M["plastic"], a,
+                     smooth=True), ("Left" if sx < 0 else "Right") + " speaker",
+                 "Sealed speaker box, 11 × 25 mm driver, with acoustic foam gasket.")
+        grille = obj("SM_Speaker_" + side + "_Grille", rbox(x, -100, 16, 42, 2.2, 3.0, 3.0, 3), M["speaker"], o)
+        holes = []
+        for i in range(-3, 4):
+            for j in range(-9, 10):
+                holes.append(cylz(x + i * 2.0 + (1.0 if j % 2 else 0), -100 + j * 2.0, 1.0, 4.0, 0.6, 6))
+        cut(grille, holes)
+        sb = Bag()
+        sb.add("foam", ring(rrect(x, -100, 20, 48, 3.5, 4), rrect(x, -100, 16.4, 44.4, 2.0, 4), 2.0, 2.2))
+        sb.add("label", rbox(x, -100, 12, 20, 11.0, 11.05, 1.0))
+        sb.add("labeltext", Geo().merge(text_lines(["4Ω 2W", "SPK " + side], 1.2, 0.0), T(x, -100, 11.06) @ Rz(math.pi / 2)))
+        sb.add("wirered", pipe_geo([(x - sx * 8, -74, 8.0), (x - sx * 10, -64, 8.5), (sx * 130 + 0.6, -55, 9.0)], 0.35, 1.0, 4.0, 1))
+        sb.add("cableblack", pipe_geo([(x - sx * 7, -74, 8.0), (x - sx * 9, -64, 8.5), (sx * 130 - 0.6, -55, 9.0)], 0.35, 1.0, 4.0, 1))
+        sb.put(P.plug(2, 1.25, ("zif",)), T(sx * 130, -52.6, 7.0))
+        sb.emit("SM_Speaker_" + side + "_Detail", o, smooth=("wirered", "cableblack"))
     return g
 
 
-BOARD = [(-172, -56), (145, -56), (145, 50), (79, 50), (79, 141), (-79, 141), (-79, 50), (-172, 50)]
+def offset_rect(cx, cy, w, d, pad):
+    return (cx - w / 2 - pad, cx + w / 2 + pad, cy - d / 2 - pad, cy + d / 2 + pad)
 
 
-def in_poly(x, y, poly):
-    inside = False
-    n = len(poly)
+def bus(a, b, n, pitch, mode, ch=1.6):
+    out = []
+    ax, ay = a
+    bxx, by = b
+    sx = 1 if bxx >= ax else -1
+    sy = 1 if by >= ay else -1
     for i in range(n):
-        x0, y0 = poly[i]
-        x1, y1 = poly[(i + 1) % n]
-        if (y0 > y) != (y1 > y) and x < (x1 - x0) * (y - y0) / (y1 - y0) + x0:
-            inside = not inside
-    return inside
+        o = (i - (n - 1) / 2) * pitch
+        if mode == "h":
+            d = abs(by - ay)
+            xm = (ax + bxx) / 2
+            pts = [(ax, ay + o), (bxx, by + o)] if d < 0.01 else \
+                [(ax, ay + o), (xm - sx * d / 2, ay + o), (xm + sx * d / 2, by + o), (bxx, by + o)]
+        elif mode == "v":
+            d = abs(bxx - ax)
+            ym = (ay + by) / 2
+            pts = [(ax + o, ay), (bxx + o, by)] if d < 0.01 else \
+                [(ax + o, ay), (ax + o, ym - sy * d / 2), (bxx + o, ym + sy * d / 2), (bxx + o, by)]
+        elif mode == "hv":
+            cx = bxx - sx * sy * o
+            cy = ay + o
+            pts = [(ax, cy), (cx - sx * ch, cy), (cx, cy + sy * ch), (cx, by)]
+        else:
+            cy = by - sx * sy * o
+            cx = ax + o
+            pts = [(cx, ay), (cx, cy - sy * ch), (cx + sx * ch, cy), (bxx, cy)]
+        out.append(pts)
+    return out
 
 
-def in_rects(x, y, rects):
-    return any(r[0] <= x <= r[1] and r[2] <= y <= r[3] for r in rects)
+def board_layer(side, rects, buses, extra_fan, n_stitch):
+    lay = Bag()
+    vias = []
+    for (a, b, n, pitch, mode, w) in buses:
+        for pts in bus(a, b, n, pitch, mode):
+            if all(in_poly(x, y, BOARD) for x, y in pts):
+                lay.add("trace", strip(pts, w, 0.0, 0.035))
+                vias.append(pts[0])
+                vias.append(pts[-1])
+    for r in extra_fan:
+        x0, x1, y0, y1 = r
+        for _ in range(int((x1 - x0 + y1 - y0) * 0.9)):
+            e = RNG.randrange(4)
+            if e == 0:
+                p, d = (RNG.uniform(x0, x1), y1 + 0.4), (0, 1)
+            elif e == 1:
+                p, d = (RNG.uniform(x0, x1), y0 - 0.4), (0, -1)
+            elif e == 2:
+                p, d = (x1 + 0.4, RNG.uniform(y0, y1)), (1, 0)
+            else:
+                p, d = (x0 - 0.4, RNG.uniform(y0, y1)), (-1, 0)
+            l1, l2 = RNG.uniform(0.6, 2.4), RNG.uniform(0.4, 1.6)
+            turn = RNG.choice((-1, 1))
+            q = (p[0] + d[0] * l1, p[1] + d[1] * l1)
+            q2 = (q[0] + (d[0] - d[1] * turn) * l2 * 0.7, q[1] + (d[1] + d[0] * turn) * l2 * 0.7)
+            if in_poly(q2[0], q2[1], BOARD) and not in_rects(q2[0], q2[1], rects, 0.3):
+                lay.add("trace", strip([p, q, q2], 0.14, 0.0, 0.035))
+                vias.append(q2)
+    k = 0
+    tries = 0
+    while k < n_stitch and tries < n_stitch * 20:
+        tries += 1
+        x, y = RNG.uniform(-170, 143), RNG.uniform(-54, 139)
+        if in_poly(x, y, BOARD) and not in_rects(x, y, rects, 1.0):
+            vias.append((x, y))
+            k += 1
+    ring_pts = round_poly([(-169.5, -53.5), (142.5, -53.5), (142.5, 47.5), (76.5, 47.5), (76.5, 138.5),
+                           (-76.5, 138.5), (-76.5, 47.5), (-169.5, 47.5)], 2.0, 3)
+    lay.add("pour", strip(ring_pts + [ring_pts[0]], 1.6, 0.0, 0.03, ends=False))
+    for i in range(0, len(ring_pts), 2):
+        vias.append(ring_pts[i])
+    for x, y in vias:
+        lay.add("via", annulus_top(x, y, 0.32, 0.14, 0.045, 8))
+        lay.add("hole", disk_top(x, y, 0.15, 0.04, 6))
+    silk = Geo()
+    for key, (cx, cy, w, d, des) in (BOTTOM if side == "bottom" else TOP).items():
+        x0, x1, y0, y1 = offset_rect(cx, cy, w, d, 0.7)
+        silk.merge(strip([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)], 0.15, 0.0, 0.03))
+        silk.merge(disk_top(x0 - 0.8, y1 + 0.8, 0.35, 0.03, 8))
+    lay.add("silk", silk)
+    return lay
+
+
+def silk_text(side, x, y, lines, size):
+    if side == "top":
+        return Geo().merge(text_lines(lines, size, 0.0), T(x, y, ZT + 0.03))
+    return Geo().merge(text_lines(lines, size, 0.0), T(x, y, ZB - 0.03) @ Ry(math.pi))
 
 
 def build_motherboard():
     collection("COL_Motherboard")
     g = meta(empty("GRP_Motherboard"), "System board",
-             "Main logic board. The CPU, GPU, video memory, RAM, SSD and Wi-Fi card are attached to it and move with it.",
+             "Main logic board. The CPU, GPU, chipset, video memory, RAM, SSD and Wi-Fi card are attached to it and move with it.",
              (0, 0, 3 * GAP), 3)
-    z0, z1 = 10.6, 11.8
-    obj("SM_MB_PCB", prism(BOARD, z0, z1), M["pcb"], g)
+    outline = round_poly(BOARD, 3.0, 4)
+    pcb = obj("SM_MB_PCB", prism(outline, ZB, ZT), M["mask"], g)
+    cut(pcb, [cylz(x, y, ZB - 1, ZT + 1, 1.6, 16) for x, y in MOUNTS])
+    mb = Bag()
+    for x, y in MOUNTS:
+        mb.add("gold", ring(circle(x, y, 3.2, 20), circle(x, y, 1.6, 20), ZT, ZT + 0.05))
+        mb.add("gold", ring(circle(x, y, 3.2, 20), circle(x, y, 1.6, 20), ZB - 0.05, ZB))
+        mb.add("gold", ring(circle(x, y, 1.62, 16), circle(x, y, 1.5, 16), ZB, ZT, top=False, bottom=False))
+    brect = [offset_rect(*v[:4], 0.5) for v in BOTTOM.values()] + [offset_rect(cx, cy, 8, 8, 0) for cx, cy in VRM_CPU + VRM_GPU]
+    trect = [offset_rect(*v[:4], 0.5) for v in TOP.values()]
+    bottom_buses = [
+        ((-50, 11.2), (-50, -15.0), 36, 0.42, "v", 0.12),
+        ((-28, 11.2), (30, -15.0), 30, 0.42, "vh" if False else "v", 0.12),
+        ((-22.5, 30), (22.5, 30), 32, 0.4, "h", 0.11),
+        ((-67.5, 30), (-99.5, 30), 18, 0.45, "h", 0.12),
+        ((-112, 17.5), (-82, -26), 10, 0.5, "vh", 0.12),
+        ((-99.5, 22), (86, 4), 10, 0.45, "h", 0.12),
+        ((40, 14.5), (12, 22.5), 16, 0.4, "vh", 0.11),
+        ((40, 49.5), (12, 42.5), 16, 0.4, "vh", 0.11),
+        ((57.5, 40), (68, 54.5), 16, 0.4, "hv", 0.11),
+        ((57.5, 24), (68, 9.5), 16, 0.4, "hv", 0.11),
+        ((-45, 49), (-45, 54), 8, 1.5, "v", 0.9),
+        ((40, 49.5), (40, 57), 6, 1.6, "v", 0.9),
+        ((-112, 42.5), (-90, 44), 4, 0.6, "h", 0.2),
+        ((0, -48.5), (0, -40), 6, 1.4, "v", 0.8),
+    ]
+    top_buses = [
+        ((0, 17.5), (-95.5, 0), 26, 0.4, "vh", 0.12),
+        ((-10, -43), (-100, -4.5), 12, 0.4, "vh", 0.12),
+        ((-30, 122.5), (-45, 50), 20, 0.4, "v", 0.11),
+        ((-40, 113.5), (-40, 128), 12, 0.4, "v", 0.12),
+        ((-150, 18), (-158, 25), 8, 0.45, "vh", 0.14),
+        ((20, 110.5), (12, 128), 8, 0.45, "v", 0.14),
+        ((60, -26.5), (0, -53), 6, 1.4, "vh", 0.9),
+        ((96, -30), (134, -32), 10, 0.5, "h", 0.16),
+        ((-112, -23.5), (-100, -4.5), 6, 0.4, "vh", 0.12),
+        ((-15, 128), (-15, 60), 8, 0.42, "v", 0.12),
+        ((12, 128), (30, 60), 10, 0.42, "v", 0.12),
+        ((-60, 60), (-60, 128), 6, 1.8, "v", 1.0),
+    ]
+    fan_bottom = [offset_rect(*BOTTOM[k][:4], 0) for k in ("PCH", "AUDIO", "WLAN", "SSD1", "SSD2", "COIN", "BATT")]
+    fan_bottom += [offset_rect(cx, cy, 7.5, 7.5, 0) for cx, cy in VRM_CPU + VRM_GPU]
+    fan_top = [offset_rect(*v[:4], 0) for v in TOP.values()]
+    mb.put(board_layer("bottom", brect, bottom_buses, fan_bottom, 520), BOT_FLAT)
+    mb.put(board_layer("top", trect, top_buses, fan_top, 380), TOP_FLAT)
+    for key, (cx, cy, w, d, des) in BOTTOM.items():
+        mb.add("silk", silk_text("bottom", cx + w / 2 + 2.2, cy + d / 2 + 1.4, [des], 1.1))
+    for key, (cx, cy, w, d, des) in TOP.items():
+        mb.add("silk", silk_text("top", cx, cy + d / 2 + 1.6, [des], 1.1))
+    mb.add("silk", silk_text("bottom", 0, 105, ["DELL", "G16 7630 MB  LA-M591P", "REV: 1.0   94V-0  E89380",
+                                                 "2324  MADE IN CHINA"], [3.2, 1.6, 1.4, 1.4]))
+    mb.add("silk", silk_text("top", 60, 30, ["LA-M591P  REV 1.0", "DAZ  2324"], [1.8, 1.4]))
+    mb.add("silk", Geo().merge(datamatrix(RNG, 0, 0, 7.0, 0.0, 14), T(-40, 85, ZT + 0.03)))
+    mb.add("label", rbox(-40, 72, 34, 10, ZT, ZT + 0.06, 0.6))
+    mb.add("labeltext", Geo().merge(text_lines(["SN CN0X7G9W1296132B0012", "DP/N 0X7G9W  A00"], 1.1, 0.0), T(-38, 73.5, ZT + 0.065)))
+    mb.add("labeltext", barcode(RNG, -55, 68.0, 30, 2.4, ZT + 0.062))
+    mb.emit("SM_MB_Board", g, smooth=())
 
-    pads = Geo()
-    holes = Geo()
-    for x, y in [(-165, -50), (138, -50), (-165, 44), (138, 44), (-72, 135), (72, 135), (-20, -50), (0, 80)]:
-        pads.merge(ring(circle(x, y, 3.2, 20), circle(x, y, 1.5, 20), z1, z1 + 0.05))
-        pads.merge(ring(circle(x, y, 3.2, 20), circle(x, y, 1.5, 20), z0 - 0.05, z0))
-        holes.merge(cylz(x, y, z0 - 0.04, z1 + 0.04, 1.5, 20))
-    obj("SM_MB_MountPads", pads, M["gold"], g)
-    obj("SM_MB_MountHoles", holes, M["vent"], g)
+    cpu = meta(empty("GRP_CPU", parent=g), "CPU",
+               "Intel Core i7-13650HX (i5-13450HX to i9-13900HX options). Soldered BGA, bare die facing the cold plate.")
+    bag, _ = P.cpu_package(RNG)
+    Bag().put(bag, bot_m(-45, 30)).emit("SM_CPU", cpu)
+    gpu = meta(empty("GRP_GPU", parent=g), "GPU",
+               "NVIDIA GeForce RTX 4060 Laptop GPU (RTX 3050 to RTX 4070 options). AD107 die inside a steel stiffener.")
+    bag, _ = P.gpu_package(RNG)
+    Bag().put(bag, bot_m(40, 32)).emit("SM_GPU", gpu)
+    pch = meta(empty("GRP_PCH", parent=g), "Chipset", "Intel HM770 platform controller hub, soldered BGA.")
+    bag, _ = P.pch_package(RNG)
+    Bag().put(bag, bot_m(-112, 30)).emit("SM_PCH", pch)
+    vram = meta(empty("GRP_VRAM", parent=g), "Video memory", "8 GB GDDR6 in four 16 Gb chips around the GPU.")
+    vb = Bag()
+    chip = P.bga(14.0, 12.0, 1.1, ["SAMSUNG 247", "K4Z80325BC-HC18", "GKA151VG"], 0.8)
+    for k in ("VRAM1", "VRAM2", "VRAM3", "VRAM4"):
+        cx, cy = BOTTOM[k][:2]
+        vb.put(chip, bot_m(cx, cy))
+    vb.emit("SM_VRAM", vram)
 
-    cpu = meta(obj("SM_CPU", rbox(-45, 30, 45, 37.5, 9.6, z0, 0.6), M["substrate"], g), "CPU",
-               "Intel Core i7-13650HX (i5-13450HX to i9-13900HX options). Soldered BGA package, die facing the cold plate.")
-    obj("SM_CPU_Die", rbox(-45, 30, 24, 11, 9.0, 9.6, 0.2), M["silicon"], cpu)
-    caps = Geo()
-    for i in range(14):
-        caps.merge(bx(-63 + i * 2.6, -62 + i * 2.6, 40, 41.6, 9.35, 9.6))
-        caps.merge(bx(-63 + i * 2.6, -62 + i * 2.6, 18.4, 20, 9.35, 9.6))
-    obj("SM_CPU_Caps", caps, M["smd"], cpu)
-
-    gpu = meta(obj("SM_GPU", rbox(40, 32, 35, 35, 9.6, z0, 0.6), M["substrate"], g), "GPU",
-               "NVIDIA GeForce RTX 4060 Laptop GPU (RTX 3050 to RTX 4070 options). Soldered to the board.")
-    obj("SM_GPU_Die", rbox(40, 32, 13, 13, 9.0, 9.6, 0.2), M["silicon"], gpu)
-    caps = Geo()
-    for i in range(10):
-        caps.merge(bx(27 + i * 2.6, 28 + i * 2.6, 45.5, 47, 9.35, 9.6))
-    obj("SM_GPU_Caps", caps, M["smd"], gpu)
-    vram = Geo()
-    for x, y in [(12, 48), (12, 16), (68, 48), (68, 16)]:
-        vram.merge(rbox(x, y, 14, 12, 9.4, z0, 0.3))
-    meta(obj("SM_VRAM", vram, M["chip"], g), "Video memory", "8 GB GDDR6 in four chips around the GPU.")
-
-    for slot, cx in (("A", -40.0), ("B", 35.0)):
+    for slot, key in (("A", "DIMMA"), ("B", "DIMMB")):
+        cx, cy = BOTTOM[key][:2]
         r = meta(empty("GRP_RAM_" + slot, parent=g), "Memory, slot " + slot,
-                 "DDR5-4800 SO-DIMM, 8 or 16 GB per slot, dual-channel.")
-        obj("SM_RAM_" + slot + "_PCB", bx(cx - 34.8, cx + 34.8, -50, -20, 8.2, 9.2), M["pcb"], r)
-        chips = Geo()
-        for i in range(4):
-            chips.merge(rbox(cx - 24 + i * 16, -37, 11, 10, 7.4, 8.2, 0.3))
-        obj("SM_RAM_" + slot + "_Chips", chips, M["chip"], r)
-        obj("SM_RAM_" + slot + "_Contacts", bx(cx - 32, cx + 32, -22.6, -19.8, 8.15, 9.25), M["gold"], r)
-        obj("SM_RAM_" + slot + "_Label", rbox(cx + 16, -42, 26, 10, 7.36, 7.4, 0.6), M["label"], r)
-        obj("SM_RAM_" + slot + "_Slot", bx(cx - 37, cx + 37, -21.5, -15.5, 7.0, z0), M["chip"], g)
-        clips = bx(cx - 38.6, cx - 36.4, -46, -24, 7.6, z0)
-        clips.merge(bx(cx + 36.4, cx + 38.6, -46, -24, 7.6, z0))
-        obj("SM_RAM_" + slot + "_Clips", clips, M["steel"], g)
+                 "DDR5-4800 SO-DIMM, 16 GB 1Rx8: eight DRAM chips, on-module PMIC and SPD hub.")
+        Bag().put(P.sodimm(RNG), bot_m(cx, cy) @ Rz(math.pi) @ T(0, 14.0, 1.4)).emit("SM_RAM_" + slot, r)
+        Bag().put(P.dimm_slot(), bot_m(cx, cy) @ Rz(math.pi)).emit("SM_RAM_" + slot + "_Slot", g)
 
-    ssd = meta(empty("GRP_SSD", parent=g), "SSD", "M.2 2280 PCIe Gen4 x4 NVMe solid-state drive.")
-    obj("SM_SSD_PCB", bx(-159, -79, -41, -19, 7.6, 8.4), M["chip"], ssd)
-    chips = rbox(-90, -30, 12, 12, 6.8, 7.6, 0.4)
-    chips.merge(rbox(-112, -30, 16, 18, 6.8, 7.6, 0.4))
-    chips.merge(rbox(-134, -30, 16, 18, 6.8, 7.6, 0.4))
-    obj("SM_SSD_Chips", chips, M["chip"], ssd)
-    obj("SM_SSD_Label", rbox(-124, -30, 46, 16, 6.74, 6.8, 0.8), M["label"], ssd)
-    obj("SM_SSD_Contacts", bx(-82, -79.2, -39, -21, 7.55, 8.45), M["gold"], ssd)
-    obj("SM_SSD_Connector", bx(-81, -75, -42, -18, 7.8, z0), M["chip"], g)
-    obj("SM_SSD_Standoff", cylz(-159, -30, 7.2, z0, 2.4, 20), M["steel"], g, smooth=True)
-
+    ssd = meta(empty("GRP_SSD", parent=g), "SSD", "M.2 2280 PCIe Gen4 x4 NVMe SSD: controller, two NAND packages, PMU.")
+    sx, sy = BOTTOM["SSD1"][:2]
+    Bag().put(P.ssd_card(RNG), bot_m(sx, sy) @ Rz(-math.pi / 2) @ T(0, 40.0 - 1.0, 1.8)).emit("SM_SSD", ssd)
+    Bag().put(P.m2_socket(), bot_m(sx, sy) @ Rz(math.pi)).put(P.screw(2.2, 0.9), bot_m(sx - 79.0, sy) @ T(0, 0, 2.6)) \
+        .add("steel", cylz(0, 0, 0, 2.6, 2.4, 20), bot_m(sx - 79.0, sy)).emit("SM_SSD_Socket", g, smooth=("steel",))
     s2 = meta(empty("GRP_M2_Slot2", parent=g), "Second M.2 slot", "Free M.2 2230/2280 slot for a second SSD.")
-    obj("SM_M2_Slot2_Connector", bx(75, 81, -42, -18, 7.8, z0), M["chip"], s2)
-    obj("SM_M2_Slot2_Standoff", cylz(111, -30, 7.2, z0, 2.4, 20), M["steel"], s2, smooth=True)
-    obj("SM_M2_Slot2_Pad", rbox(96, -30, 26, 20, 7.6, 7.9, 1.0), M["fpc"], s2)
+    x2, y2 = BOTTOM["SSD2"][:2]
+    Bag().put(P.m2_socket(), bot_m(x2, y2)).add("steel", cylz(0, 0, 0, 2.6, 2.4, 20), bot_m(x2 + 33.0, y2)) \
+        .add("thermalpad", rbox(0, 0, 20, 24, 0, 0.4, 1.0), bot_m(x2 + 18.0, y2)).emit("SM_M2_Slot2", s2, smooth=("steel",))
 
     wifi = meta(empty("GRP_WiFi", parent=g), "Wireless card",
-                "M.2 2230 Wi-Fi 6E and Bluetooth card (Intel AX211 or Killer options) with two antenna leads.")
-    obj("SM_WiFi_PCB", bx(89, 111, -5, 25, 8.2, 9.0), M["pcb"], wifi)
-    obj("SM_WiFi_Shield", rbox(100, 12, 18, 20, 7.4, 8.2, 0.8), M["alu"], wifi)
-    obj("SM_WiFi_Connector", bx(87, 113, -8, -3, 8.0, z0), M["chip"], g)
-    leads = pipe_geo([(96, 24), (96, 40), (77.5, 50), (77.5, 126), (64, 136)], 9.2, 0.6, 1.0, 6.0)
-    obj("SM_WiFi_Lead_Main", leads, M["cableblack"], wifi, smooth=True)
-    leads = pipe_geo([(104, 24), (104, 42), (78.6, 52), (78.6, 126), (66, 138)], 9.2, 0.6, 1.0, 6.0)
-    obj("SM_WiFi_Lead_Aux", leads, M["cablegrey"], wifi, smooth=True)
+                "M.2 2230 Wi-Fi 6E and Bluetooth card (Intel AX211 or Killer options) with MAIN and AUX antenna leads.")
+    wx, wy = BOTTOM["WLAN"][:2]
+    wm = bot_m(wx, wy + 15.0 + 2.5 - 2.5) @ T(0, 0, 1.6)
+    wb = Bag().put(P.wifi_card(RNG), bot_m(wx, wy + 15.5) @ T(0, 0, 1.6))
+    wb.put(P.ufl_cable([(-4.0, 11.4, 3.3), (-4.0, 30.0, 3.6), (14.0, 45.0, 3.6), (14.0, 110.0, 3.6), (30.0, 120.0, 3.6)],
+                       "cableblack"), bot_m(wx, wy + 15.5))
+    wb.put(P.ufl_cable([(4.0, 11.4, 3.3), (4.0, 30.0, 3.9), (16.0, 45.0, 3.9), (16.0, 112.0, 3.9), (32.0, 122.0, 3.9)],
+                       "cablegrey"), bot_m(wx, wy + 15.5))
+    wb.put(P.m2_socket(22.0, 3.0, 2.0), bot_m(wx, wy) @ Rz(math.pi / 2))
+    wb.put(P.screw(2.0, 0.8), bot_m(wx, wy + 30.0) @ T(0, 0, 2.4))
+    wb.emit("SM_WiFi", wifi, smooth=("cableblack", "cablegrey", "gold"))
 
-    coin = meta(obj("SM_CoinCell", cylz(-120, 8, 8.0, z0, 10.0, 32), M["battery"], g, smooth=True),
-                "RTC coin-cell battery", "Keeps the BIOS settings and clock when the main battery is removed.")
-    obj("SM_CoinCell_Wire", pipe_geo([(-110, 8), (-100, 8), (-96, 0)], 9.0, 0.6, 1.0, 3.0), M["cableblack"], coin,
-        smooth=True)
+    coin = meta(empty("GRP_CoinCell", parent=g), "RTC coin-cell battery",
+                "CR2032 cell in shrink wrap. Keeps the BIOS settings and clock when the main battery is removed.")
+    ccx, ccy = BOTTOM["COIN"][:2]
+    cb = Bag()
+    cb.add("steel", cylz(0, 0, 0.2, 3.4, 10.0, 36), bot_m(ccx, ccy))
+    cb.add("kapton", ring(circle(0, 0, 10.25, 36), circle(0, 0, 8.6, 36), 0.0, 3.5), bot_m(ccx, ccy))
+    cb.add("labeltext", Geo().merge(text_lines(["CR2032", "3V"], 2.0, 0.0), T(0, 0, 3.41)), bot_m(ccx, ccy))
+    cb.add("wirered", pipe_geo([(-140, 30, 9.0), (-132, 30, 9.0), (-128, 36, 9.2)], 0.35, 1.0, 3.0, 1))
+    cb.add("cableblack", pipe_geo([(-140, 26, 9.0), (-131, 26, 9.0), (-127, 34, 9.2)], 0.35, 1.0, 3.0, 1))
+    cb.emit("SM_CoinCell", coin, smooth=("steel", "kapton", "wirered", "cableblack"))
 
-    vrm = Geo()
-    mos = Geo()
-    for i in range(6):
-        vrm.merge(rbox(-70 + i * 9.5, 58, 7.5, 7.5, 7.6, z0, 0.6))
-        mos.merge(rbox(-70 + i * 9.5, 66, 5, 6, 9.6, z0, 0.3))
+    pw = meta(empty("GRP_VRM", parent=g), "Power stages",
+              "11 inductors with DrMOS power stages and polymer capacitors feeding the CPU and GPU.")
+    pb = Bag()
+    for cx, cy in VRM_CPU:
+        pb.put(P.choke(7.5, 4.0, "R22"), bot_m(cx, cy))
+        pb.put(P.drmos(), bot_m(cx, cy + 8.5))
+    for cx, cy in VRM_GPU:
+        pb.put(P.choke(7.5, 4.0, "R22"), bot_m(cx, cy))
+        pb.put(P.drmos(), bot_m(cx, cy + 8.5))
+    for i in range(4):
+        pb.put(P.spcap("470"), bot_m(-12.0, 54.0 + i * 5.0) @ Rz(math.pi / 2) if False else bot_m(-14.0 + 0.0, 52.0 + i * 5.0))
+    pb.emit("SM_VRM", pw, smooth=("ferrite",))
+
+    io = meta(empty("GRP_Chips", parent=g), "Controller chips",
+              "Embedded controller, BIOS flash, Thunderbolt controller, 2.5G LAN, USB-C PD and charger ICs.")
+    ib = Bag()
+    for key, bag in (("EC", P.lqfp(9.0, 24, 1.4, IC_MARKS["EC"], 0.8)), ("SPI", P.soic(4, 5.0, 4.0, 1.5, IC_MARKS["SPI"], 0.55)),
+                     ("TBT", P.bga(11.0, 11.0, 1.0, IC_MARKS["TBT"], 0.9)), ("LAN", P.qfn(8.0, 8.0, 0.9, 12, 12, IC_MARKS["LAN"], 0.75)),
+                     ("PD", P.qfn(5.0, 5.0, 0.8, 8, 8, IC_MARKS["PD"], 0.5)), ("CHG", P.qfn(7.0, 7.0, 0.9, 10, 10, IC_MARKS["CHG"], 0.7)),
+                     ("RTC", P.qfn(4.0, 4.0, 0.8, 5, 5, IC_MARKS["RTC"], 0.5))):
+        cx, cy = TOP[key][:2]
+        ib.put(bag, top_m(cx, cy))
+    for x, y in ((-92, 6), (-36, 104), (-146, 20)):
+        ib.put(P.crystal(), top_m(x, y))
+    for x, y in P_CHG_L:
+        ib.put(P.choke(10.0, 3.0, "4R7"), top_m(x, y))
+    ax, ay = BOTTOM["AUDIO"][:2]
+    ib.add("steel", prism(rrect(0, 0, 16, 14, 0.6, 2), 0.0, 1.6, top_loop=rrect(0, 0, 15.6, 13.6, 0.4, 2)), bot_m(ax, ay))
     for i in range(5):
-        vrm.merge(rbox(20 + i * 10, 61, 7.5, 7.5, 7.6, z0, 0.6))
-        mos.merge(rbox(20 + i * 10, 69, 5, 6, 9.6, z0, 0.3))
-    meta(obj("SM_VRM_Chokes", vrm, M["choke"], g, smooth=True, angle=50), "Power stages",
-         "Inductors and MOSFETs that regulate power for the CPU and GPU.")
-    obj("SM_VRM_Mosfets", mos, M["chip"], g)
+        for j in range(4):
+            ib.add("hole", disk_top(-6 + i * 3, -4.5 + j * 3, 0.5, 1.61, 8), bot_m(ax, ay))
+    ib.emit("SM_Chips", io, smooth=())
 
-    keep_bottom = [(-68, -22, 11, 49), (3, 77, 8, 56), (-76, 71, -52, -14), (-160, -74, -42, -17),
-                   (86, 114, -9, 26), (-131, -109, -3, 19), (-75, 70, 53, 74), (73, 83, -43, -17)]
-    smd = Geo()
-    n = 0
-    while n < 240:
-        x, y = random.uniform(-171, 144), random.uniform(-55, 140)
-        if not in_poly(x, y, BOARD) or in_rects(x, y, keep_bottom):
-            continue
-        w, d = random.choice([(1.6, 0.8), (1.0, 0.5), (2.0, 1.25), (3.2, 1.6)])
-        if random.random() < 0.5:
-            w, d = d, w
-        smd.merge(bx(x - w / 2, x + w / 2, y - d / 2, y + d / 2, z0 - 0.6, z0))
-        n += 1
-    n = 0
-    keep_top = [(-20, 20, 15, 25), (-32, 12, -50, -40), (-60, 60, 125, 141)]
-    while n < 140:
-        x, y = random.uniform(-171, 144), random.uniform(-55, 140)
-        if not in_poly(x, y, BOARD) or in_rects(x, y, keep_top):
-            continue
-        w, d = random.choice([(1.6, 0.8), (1.0, 0.5), (2.0, 1.25)])
-        smd.merge(bx(x - w / 2, x + w / 2, y - d / 2, y + d / 2, z1, z1 + 0.6))
-        n += 1
-    obj("SM_MB_SMD", smd, M["smd"], g)
+    conn = meta(empty("GRP_Connectors", parent=g), "Board connectors",
+                "Keyboard, backlight, touchpad, display, battery, fan and speaker connectors.")
+    cb = Bag()
+    cb.put(P.zif(26), top_m(*TOP["KB"][:2]))
+    cb.put(P.zif(12), top_m(*TOP["KBL"][:2]))
+    cb.put(P.zif(12), top_m(*TOP["TP"][:2]))
+    cb.put(P.zif(40, 0.4, 5.0, 1.3), top_m(*TOP["EDP"][:2]) @ Rz(math.pi))
+    cb.put(P.zif(16), top_m(*TOP["IOFPC"][:2]) @ Rz(math.pi / 2))
+    cb.put(P.jst(6, 2.0, "zif"), bot_m(*BOTTOM["BATT"][:2]))
+    cb.put(P.jst(4, 0.7, "zif"), bot_m(*BOTTOM["FAN1"][:2]))
+    cb.put(P.jst(4, 0.7, "zif"), bot_m(*BOTTOM["FAN2"][:2]))
+    cb.put(P.jst(2, 1.25, "zif"), bot_m(*BOTTOM["SPK1"][:2]))
+    cb.put(P.jst(2, 1.25, "zif"), bot_m(*BOTTOM["SPK2"][:2]))
+    cb.emit("SM_Connectors", conn)
 
-    ics = Geo()
-    for x, y, w, d in [(-100, 0, 9, 9), (-112, -26, 6, 5), (-40, 112, 11, 11), (-150, -35, 6, 6),
-                       (20, 114, 5, 5), (-150, 12, 8, 8), (-60, -30, 7, 7), (50, -30, 10, 10), (110, -30, 8, 8)]:
-        ics.merge(rbox(x, y, w, d, z1, z1 + 0.9, 0.3))
-    obj("SM_MB_ICs", ics, M["chip"], g)
-
-    zif = rbox(0, 20, 30, 4.5, z1, z1 + 1.1, 0.4)
-    zif.merge(rbox(-10, -45, 14, 4, z1, z1 + 1.0, 0.4))
-    zif.merge(rbox(-30, 125, 22, 5, z1, z1 + 1.2, 0.4))
-    zif.merge(rbox(0, -52, 24, 7, 7.6, z0, 0.4))
-    obj("SM_MB_Connectors", zif, M["zif"], g)
+    smd = Bag()
+    sizes = (("0201", 0.30), ("0402", 0.40), ("0603", 0.18), ("0805", 0.08), ("1206", 0.04))
+    for side, n, rects in (("bottom", 900, brect), ("top", 600, trect)):
+        k = 0
+        tries = 0
+        while k < n and tries < n * 30:
+            tries += 1
+            x, y = RNG.uniform(-170, 143), RNG.uniform(-54, 139)
+            if not in_poly(x, y, BOARD) or in_rects(x, y, rects, 0.6):
+                continue
+            r = RNG.random()
+            acc = 0
+            size = "0402"
+            for s_, p_ in sizes:
+                acc += p_
+                if r < acc:
+                    size = s_
+                    break
+            body = "resistor" if RNG.random() < 0.35 else "mlcc"
+            m = (top_m if side == "top" else bot_m)(x, y, RNG.choice((0.0, math.pi / 2)))
+            smd.put(P.passive(size, body), m)
+            k += 1
+    for cx, cy, w, d, des in list(BOTTOM.values())[:3]:
+        for i in range(int(w / 1.2)):
+            for yy in (cy - d / 2 - 1.4, cy + d / 2 + 1.4):
+                smd.put(P.passive("0402", "mlcc"), bot_m(cx - w / 2 + 0.6 + i * 1.2, yy, math.pi / 2))
+    smd.emit("SM_MB_Passives", g)
 
     rear = meta(empty("GRP_Ports_Rear", parent=g), "Rear ports",
                 "HDMI 2.1, USB 3.2 Gen 1 Type-A, Thunderbolt 4 (RTX 4070 models) or USB-C 3.2 Gen 2 with DisplayPort, and the 7.4 mm power jack.")
-    shells = bx(-44.6, -35.4, 128, 144.0, 11.7, 15.3)
-    shells.merge(bx(-21.6, -8.4, 126, 144.0, 10.6, 16.4))
-    shells.merge(bx(4.4, 19.6, 126, 144.0, 10.5, 16.5))
-    obj("SM_Ports_Rear_Shells", shells, M["steel"], rear)
-    dc = bx(37.5, 46.5, 128, 143.0, 8.5, 18.5)
-    obj("SM_Ports_Rear_DCJack", dc, M["chip"], rear)
-    obj("SM_Ports_Rear_DCRing", cyly(143.0, 144.0, 42, 13.5, 4.4, 28), M["steel"], rear, smooth=True)
-
-    left = meta(empty("GRP_Ports_Left", parent=g), "Left ports", "RJ-45 Ethernet and universal audio jack.")
-    obj("SM_Ports_Left_RJ45", bx(-177.2, -158, -13, 3, 5.6, 15.4), M["chip"], left)
-    obj("SM_Ports_Left_RJ45_Shield", bx(-177.3, -158, -13.2, 3.2, 15.4, 15.8), M["steel"], left)
-    obj("SM_Ports_Left_Audio", bx(-177.2, -163, -51.5, -44.5, 6.5, 12.5), M["chip"], left)
-    obj("SM_Ports_Left_AudioRing", cylx(-177.4, -176.6, -48, 9.5, 3.2, 24), M["steel"], left, smooth=True)
+    rb = Bag()
+    a0, a1 = YR - 16.0, YR - 0.25
+    for kind, x in REAR_PORTS:
+        if kind == "usba":
+            rb.put(P.usb_a("y", a0, a1, x, REAR_Z))
+        elif kind == "usbc":
+            rb.put(P.usb_c("y", a0 + 4.0, a1, x, REAR_Z))
+        elif kind == "hdmi":
+            rb.put(P.hdmi("y", a0 + 2.0, a1, x, REAR_Z))
+        else:
+            rb.put(P.dc_jack("y", a0, a1, x, REAR_Z))
+    rb.emit("SM_Ports_Rear", rear, smooth=())
+    left = meta(empty("GRP_Ports_Left", parent=g), "Left ports", "Drop-jaw RJ-45 2.5G Ethernet and universal audio jack.")
+    lb = Bag()
+    ly, lz = LEFT_RJ45
+    lb.put(P.rj45("x", W / 2 - 17.0, W / 2 - 0.25, ly, lz), Sc(-1, 1, 1))
+    ay_, az = LEFT_AUDIO
+    lb.put(P.audio_jack("x", W / 2 - 15.0, W / 2 - 0.25, ay_, az), Sc(-1, 1, 1))
+    lb.emit("SM_Ports_Left", left)
     return g
+
+
+P_CHG_L = [(84, -30), (96, -30)]
 
 
 def build_ioboard():
     collection("COL_IOBoard")
     g = meta(empty("GRP_IOBoard"), "I/O board",
-             "Right-side daughterboard with two USB 3.2 Gen 1 Type-A ports.", (0, 0, 3 * GAP), 3)
-    obj("SM_IO_PCB", bx(148, 174, -50, 48, 10.6, 11.8), M["pcb"], g)
-    shells = Geo()
-    tongues = Geo()
-    for y in (0, 22):
-        shells.merge(bx(162.5, 177.2, y - 6.6, y + 6.6, 7.2, 12.8))
-        tongues.merge(bx(162.5, 177.25, y - 5.4, y + 5.4, 9.8, 11.4))
-    obj("SM_IO_USB_Shells", shells, M["steel"], g)
-    obj("SM_IO_USB_Tongues", tongues, M["portin"], g)
-    smd = Geo()
+             "Right-side daughterboard with two USB 3.2 Gen 1 Type-A ports and a redriver chip.", (0, 0, 3 * GAP), 3)
+    b = Bag()
+    b.add("mask", prism(round_poly([(148, -50), (174, -50), (174, 48), (148, 48)], 2.0, 3), ZB, ZT))
+    for y, z in RIGHT_USB:
+        b.put(P.usb_a("x", W / 2 - 15.5, W / 2 - 0.25, y, z))
+    b.put(P.qfn(4.0, 4.0, 0.8, 6, 6, ["PS8743", "B"], 0.6), top_m(155, -20))
+    b.put(P.zif(16), top_m(151.5, -35) @ Rz(math.pi / 2))
+    b.add("fpc", strip([(150.5, -35), (140, -35), (138, -33)], 8.0, ZT + 1.25, 0.12))
     for i in range(30):
-        x, y = random.uniform(150, 160), random.uniform(-48, 46)
-        smd.merge(bx(x - 0.5, x + 0.5, y - 0.8, y + 0.8, 11.8, 12.3))
-    obj("SM_IO_SMD", smd, M["smd"], g)
-    obj("SM_IO_Flex", bx(120, 152, -38, -26, 11.85, 11.95), M["fpc"], g)
+        b.put(P.passive(RNG.choice(("0201", "0402", "0603")), RNG.choice(("mlcc", "resistor"))),
+              top_m(RNG.uniform(150, 160), RNG.uniform(-46, 44), RNG.choice((0.0, math.pi / 2))))
+    for y in (-30, 20, 40):
+        b.add("trace", strip([(149, y), (157, y), (160, y + 3)], 0.3, ZT, 0.035))
+    b.emit("SM_IO", g)
     return g
 
 
@@ -730,25 +632,32 @@ def legend(lbl, cx, cy, z):
         g.merge(bx(cx - 0.3, cx + 0.3, cy - 0.2, cy + 3.0, z + 0.01, z + 0.03))
         return g
     size = 4.2 if len(lbl) == 1 else (2.9 if len(lbl) <= 3 else 2.5)
-    return g.merge(text_geo(lbl, size), T(cx, cy, z))
+    return g.merge(text_geo(lbl, size, 3), T(cx, cy, z))
 
 
 def keycap(cx, cy, w, d):
-    return prism(rrect(cx, cy, w, d, 1.4, 3), -2.9, 0.4, top_loop=rrect(cx, cy, w - 1.2, d - 1.2, 1.1, 3))
+    g = prism(rrect(cx, cy, w, d, 1.4, 3), -2.9, 0.25, top_loop=rrect(cx, cy, w - 0.8, d - 0.8, 1.2, 3))
+    g.merge(prism(rrect(cx, cy, w - 0.8, d - 0.8, 1.2, 3), 0.25, 0.4, top_loop=rrect(cx, cy, w - 1.3, d - 1.3, 1.0, 3)))
+    return g
 
 
 def build_keyboard():
     collection("COL_Keyboard")
     g = meta(empty("GRP_Keyboard", (0, KY, zdeck(KY)), (SLOPE, 0, 0)), "Keyboard",
-             "85-key US layout, 19.05 mm key pitch, one-zone RGB backlight (Cherry MX mechanical option).",
+             "85-key US layout, 19.05 mm key pitch, scissor switches, one-zone RGB backlight (Cherry MX mechanical option).",
              (0, 0, 4 * GAP), 4)
-    total_w = 16.25 * U
-    total_d = HF + 5 * U
-    x0 = -total_w / 2
-    top = total_d / 2
-    obj("SM_Keyboard_Plate", rbox(0, 0, 311, 110.5, -4.4, -2.9, 3.0), M["kbplate"], g)
+    total_w, total_d = 16.25 * U, HF + 5 * U
+    x0, top = -total_w / 2, total_d / 2
+    kb = Bag()
+    kb.add("kbplate", rbox(0, 0, 311, 110.5, -4.4, -3.6, 3.0))
+    kb.add("glass", rbox(0, 0, 309, 108.5, -3.6, -3.3, 2.5))
+    kb.add("mylar", rbox(0, 0, 309, 108.5, -3.3, -3.1, 2.5))
+    for i in range(18):
+        for j in range(3):
+            kb.add("kbplate", cylz(-150 + i * 17.6, -45 + j * 45, -4.75, -4.4, 1.1, 8, top_r=1.3))
     caps = Geo()
     legends = Geo()
+    mech = Geo()
     y = top
     centers = []
     for h, keys in ROWS:
@@ -758,6 +667,8 @@ def build_keyboard():
             w = wu * U
             caps.merge(keycap(x + w / 2, cy, w - 2.6, h - 2.6))
             legends.merge(legend(lbl, x + w / 2, cy, 0.42))
+            mech.merge(bx(x + w / 2 - 5.5, x + w / 2 + 5.5, cy - 0.5, cy + 0.5, -3.1, -2.9), )
+            mech.merge(bx(x + w / 2 - 0.5, x + w / 2 + 0.5, cy - min(5.0, h / 2 - 1.8), cy + min(5.0, h / 2 - 1.8), -3.1, -2.9))
             x += w
         centers.append(cy)
         y -= h
@@ -766,111 +677,97 @@ def build_keyboard():
     for i, lbl in enumerate(COLUMN):
         if lbl == "#POWER":
             power = keycap(cx, centers[i], U - 2.6, HF - 2.6)
-            legends.merge(legend(lbl, cx, centers[i], 0.42))
-            continue
-        h = HF if i == 0 else U
-        caps.merge(keycap(cx, centers[i], U - 2.6, h - 2.6))
+        else:
+            h = HF if i == 0 else U
+            caps.merge(keycap(cx, centers[i], U - 2.6, h - 2.6))
         legends.merge(legend(lbl, cx, centers[i], 0.42))
     obj("SM_Keyboard_Keycaps", caps, M["keycap"], g, smooth=True, angle=40)
     obj("SM_Keyboard_Legends", legends, M["legend"], g)
+    kb.add("plastic", mech)
     meta(obj("SM_Keyboard_PowerButton", power, M["keycap"], g, smooth=True, angle=40), "Power button",
          "Top-right power key with status light.")
-    flex = bx(-15, 15, -42, -2, -4.55, -4.45)
-    flex.merge(bx(30, 50, -30, 0, -4.55, -4.45))
-    obj("SM_Keyboard_Flex", flex, M["fpc"], g)
+    kb.add("fpc", strip([(0, -2), (0, -30), (0, -40)], 30.0, -4.6, 0.12))
+    kb.add("fpc", strip([(40, -2), (40, -18), (40, -26)], 14.0, -4.6, 0.12))
+    kb.add("kapton", rbox(0, -10, 34, 14, -4.75, -4.72, 1.0))
+    kb.emit("SM_Keyboard", g)
     return g
 
 
 def build_touchpad():
     collection("COL_Touchpad")
     g = meta(empty("GRP_Touchpad", (TPX, TPY, zdeck(TPY)), (SLOPE, 0, 0)), "Touchpad",
-             "Precision touchpad, 105 × 65 mm.", (0, 0, 4 * GAP), 4)
+             "Precision touchpad, 105 × 65 mm glass with a mechanical click dome.", (0, 0, 4 * GAP), 4)
     obj("SM_Touchpad_Glass", rbox(0, 0, 105, 65, -1.0, -0.05, 3.0, 5), M["touchpad"], g, smooth=True)
-    obj("SM_Touchpad_Board", rbox(0, 0, 103, 63, -3.2, -1.0, 2.5, 4), M["pcb"], g)
-    obj("SM_Touchpad_Flex", bx(-6, 6, 10, 30, -3.35, -3.25), M["fpc"], g)
+    b = Bag()
+    b.add("pcbdark", rbox(0, 0, 103, 63, -1.9, -1.0, 2.5, 4))
+    b.put(P.qfn(6.0, 6.0, 0.8, 10, 10, ["ELAN", "33936", "2318"], 0.6), T(20, 10, -1.9) @ Ry(math.pi))
+    b.put(P.qfn(3.0, 3.0, 0.7, 5, 5), T(-25, -12, -1.9) @ Ry(math.pi))
+    for i in range(24):
+        b.put(P.passive("0402", "mlcc"), T(10 + (i % 8) * 2.0, -2 - (i // 8) * 2.0, -1.9) @ Ry(math.pi))
+    b.add("steel", rbox(0, -22, 60, 10, -2.4, -1.9, 1.5))
+    b.add("steel", cylz(0, -26, -2.9, -2.4, 2.5, 16))
+    b.put(P.zif(12), T(-30, 20, -1.9) @ Ry(math.pi))
+    b.add("fpc", strip([(-30, 22), (-30, 32), (-30, 40)], 7.0, -2.2, 0.12))
+    b.emit("SM_Touchpad", g, smooth=("steel",))
     return g
 
 
 def build_palmrest():
     collection("COL_Palmrest")
     g = meta(empty("GRP_Palmrest"), "Palm rest (C-cover)",
-             "Keyboard deck, side walls, rear thermal shelf and all port openings.", (0, 0, 5 * GAP), 5)
+             "Keyboard deck, side walls, rear thermal shelf, vents and port openings.", (0, 0, 5 * GAP), 5)
     ydeck_end = YSF + 12
     deck = obj("SM_Palmrest", prism(rrect(0, (YF + ydeck_end) / 2, W, ydeck_end - YF, CR), 5.0,
                                     ztop=lambda x, y: zdeck(y)), M["shell"], g)
-    cutters = []
-
-    def cutter(name, geo):
-        c = obj(name, geo, M["vent"])
-        cutters.append(c)
-        return c
-
-    shelf = cutter("CUT_Shelf", prism(rrect(0, (YSF + YR) / 2, W, SHELF, CR), 5.0, ZSH))
-    cav1 = cutter("CUT_Cavity_Deck", prism(rrect(0, (YF + WALL + YSF + 11) / 2, W - 2 * WALL,
-                                                 YSF + 11 - YF - WALL, CR - WALL), 4.0,
-                                           ztop=lambda x, y: zdeck(y) - 1.4))
-    cav2 = cutter("CUT_Cavity_Shelf", prism(rrect(0, (YSF + WALL + YR - WALL) / 2, W - 2 * WALL,
-                                                  SHELF - 2 * WALL, CR - WALL), 4.0, ZSH - 1.6))
-    kb = cutter("CUT_Keyboard", rbox(0, KY, 313.6, 112.6, 8.0, 30.0, 3.0))
-    tp = cutter("CUT_Touchpad", rbox(TPX, TPY, 106.5, 66.5, 8.0, 30.0, 3.5))
-    boolean(deck, shelf, "UNION")
-    for c in (cav1, cav2, kb, tp):
-        boolean(deck, c, "DIFFERENCE")
+    cutters = [
+        ("UNION", obj("CUT_Shelf", prism(rrect(0, (YSF + YR) / 2, W, SHELF, CR), 5.0, ZSH), M["vent"])),
+        ("DIFFERENCE", obj("CUT_Cav1", prism(rrect(0, (YF + WALL + YSF + 11) / 2, W - 2 * WALL, YSF + 11 - YF - WALL,
+                                                   CR - WALL), 4.0, ztop=lambda x, y: zdeck(y) - 1.4), M["vent"])),
+        ("DIFFERENCE", obj("CUT_Cav2", prism(rrect(0, (YSF + YR) / 2, W - 2 * WALL, SHELF - 2 * WALL, CR - WALL),
+                                             4.0, ZSH - 1.6), M["vent"])),
+        ("DIFFERENCE", obj("CUT_KB", rbox(0, KY, 313.6, 112.6, 8.0, 30.0, 3.0), M["vent"])),
+        ("DIFFERENCE", obj("CUT_TP", rbox(TPX, TPY, 106.5, 66.5, 8.0, 30.0, 3.5), M["vent"])),
+    ]
+    for op, c in cutters:
+        boolean(deck, c, op)
     apply_mods(deck)
-    for c in cutters:
+    for _, c in cutters:
         bpy.data.objects.remove(c)
-    shade(deck.data, 30)
-
-    grille = Geo()
+    holes = []
     x = -150.0
     while x <= 150.0:
-        yc = 108.0
-        grille.merge(rbox(x, yc, 1.6, 12.0, zdeck(yc) - 0.3, zdeck(yc) + 0.12, 0.8, 2))
+        holes.append(rbox(x, 108.0, 1.6, 12.0, 10.0, 30.0, 0.8, 2))
         x += 3.6
-    obj("SM_Palmrest_IntakeGrille", grille, M["vent"], g)
-
-    rear = Geo()
     for sx in (-1, 1):
         x = 70.0
-        while x <= 168.0:
-            rear.merge(bx(sx * x - 1.2, sx * x + 1.2, YR - 0.4, YR + 0.15, 6.0, 21.5))
+        while x <= 166.0:
+            holes.append(rbox(sx * x, YR, 2.4, 6.0, 6.0, 21.5, 0.5, 2))
             x += 4.2
-    for sx in (-1, 1):
-        x0, x1 = (-W / 2 - 0.15, -W / 2 + 0.4) if sx < 0 else (W / 2 - 0.4, W / 2 + 0.15)
         y = 62.0
-        while y <= 124.0:
-            rear.merge(bx(x0, x1, y - 1.1, y + 1.1, 6.5, 15.5))
+        while y <= 116.0:
+            holes.append(rbox(sx * W / 2, y, 6.0, 2.2, 6.5, 15.5, 0.5, 2))
             y += 4.0
-    obj("SM_Palmrest_ExhaustVents", rear, M["vent"], g)
-
-    ports = Geo()
-    inner = Geo()
-    o0, o1 = YR - 0.2, YR + 0.3
-    ports.merge(bx(-44.45, -35.55, o0, o1, 11.9, 15.1))
-    inner.merge(bx(-42.2, -37.8, o0, o1 + 0.05, 13.2, 13.8))
-    ports.merge(bx(-21.25, -8.75, o0, o1, 11.0, 16.0))
-    inner.merge(bx(-20.0, -10.0, o0, o1 + 0.05, 13.8, 15.4))
-    ports.merge(bx(4.5, 19.5, o0, o1, 10.75, 16.25))
-    inner.merge(bx(6.5, 17.5, o0, o1 + 0.05, 13.0, 14.6))
-    ports.merge(cyly(o0, o1, 42, 13.5, 4.0, 28))
-    inner.merge(cyly(o0, o1 + 0.05, 42, 13.5, 1.0, 16))
-    xl0, xl1 = -W / 2 - 0.3, -W / 2 + 0.2
-    ports.merge(bx(xl0, xl1, -12, 2, 5.75, 15.25))
-    inner.merge(bx(xl0 - 0.05, xl1, -10, 0, 13.8, 14.6))
-    ports.merge(cylx(xl0, xl1, -48, 9.5, 2.9, 24))
-    inner.merge(cylx(xl0 - 0.05, xl1, -48, 9.5, 1.6, 20))
-    xr0, xr1 = W / 2 - 0.2, W / 2 + 0.3
-    for y in (0, 22):
-        ports.merge(bx(xr0, xr1, y - 6.25, y + 6.25, 7.5, 12.5))
-        inner.merge(bx(xr0, xr1 + 0.05, y - 5.0, y + 5.0, 9.9, 11.3))
-    obj("SM_Palmrest_PortOpenings", ports, M["vent"], g)
-    obj("SM_Palmrest_PortInner", inner, M["portin"], g)
-    obj("SM_Palmrest_StatusLED", bx(-102, -98, YF - 0.25, YF + 0.3, 6.2, 7.2), M["led"], g)
-
-    hb = Geo()
+    for kind, x in REAR_PORTS:
+        if kind == "dc":
+            holes.append(cyly(YR - 4, YR + 2, x, REAR_Z, 4.2, 32))
+        else:
+            wv, hv, rv = {"usba": (12.8, 5.3, 0.4), "usbc": (9.0, 3.3, 1.6), "hdmi": (15.4, 6.0, 0.6)}[kind]
+            holes.append(section(rrect(x, REAR_Z, wv, hv, rv, 4), YR - 4, YR + 2, "y"))
+    holes.append(section(rrect(LEFT_RJ45[0], LEFT_RJ45[1], 16.0, 9.6, 0.4, 3), -W / 2 - 2, -W / 2 + 4, "x"))
+    holes.append(section(circle(LEFT_AUDIO[0], LEFT_AUDIO[1], 3.1, 24), -W / 2 - 2, -W / 2 + 4, "x"))
+    for y, z in RIGHT_USB:
+        holes.append(section(rrect(y, z, 12.8, 5.3, 0.4, 3), W / 2 - 4, W / 2 + 2, "x"))
+    cut(deck, holes)
+    shade(deck.data, 30)
+    pb = Bag()
+    for x, y in SCREWS:
+        pb.add("shell", ring(circle(x, y, 3.0, 16), circle(x, y, 1.1, 16), 5.0, zdeck(min(y, YSF)) - 1.3))
     for sx in (-1, 1):
-        hb.merge(bx(min(sx * 146, sx * 164), max(sx * 146, sx * 164), 100, 117, 13.0, 16.6))
-    obj("SM_Palmrest_HingeMounts", hb, M["steel"], g)
+        pb.add("steel", bx(min(sx * 146, sx * 164), max(sx * 146, sx * 164), 100, 117, 13.0, 16.6))
+        for yy in (104, 112):
+            pb.put(P.screw(1.8, 0.7), T(sx * 155, yy, 16.6))
+    pb.add("led", bx(-102, -98, YF - 0.25, YF + 0.3, 6.2, 7.2))
+    pb.emit("SM_Palmrest_Detail", g, smooth=("shell", "steel"))
     return g
 
 
@@ -882,43 +779,70 @@ def build_display():
     g["open_deg"] = OPEN
     yc = (2.0 - LL) / 2
     ya = -LL + 8.0 + ACT_H / 2
-    lw = 356.0
-    outer = rrect(0, yc, lw, LL + 2.0, 8.0, 6)
-
+    outer = rrect(0, yc, 356.0, LL + 2.0, 8.0, 6)
     back = meta(obj("SM_Display_BackCover", prism(outer, 0.4, LT / 2), M["shell"], g, smooth=True),
-                "Display back cover (A-cover)", "Aluminum lid shell with the Dell logo.", (0, 0, 40))
-    logo = ring(circle(0, -LL / 2, 23.5, 64), circle(0, -LL / 2, 22.0, 64), LT / 2, LT / 2 + 0.06)
-    logo.merge(text_geo("DELL", 11.0), T(0, -LL / 2, LT / 2 + 0.06) @ Rz(math.pi))
-    obj("SM_Display_Logo", logo, M["chrome"], back)
-
+                "Display back cover (A-cover)", "Aluminum lid shell with the Dell logo, screw bosses and Wi-Fi antennas.",
+                (0, 0, 40))
+    bb = Bag()
+    bb.add("chrome", ring(circle(0, -LL / 2, 23.5, 64), circle(0, -LL / 2, 22.0, 64), LT / 2, LT / 2 + 0.06))
+    bb.add("chrome", Geo().merge(text_geo("DELL", 11.0, 3), T(0, -LL / 2, LT / 2 + 0.06) @ Rz(math.pi)))
+    for i in range(9):
+        for y in (-LL + 5.0, -6.0):
+            bb.add("shell", ring(circle(-160 + i * 40, y, 2.2, 12), circle(-160 + i * 40, y, 0.9, 12), 0.0, 0.4))
+    for sx in (-1, 1):
+        bb.add("cableblack", rbox(sx * 120, -14, 32, 7, 0.32, 0.4, 1.0))
+        bb.add("copper", rbox(sx * 120 + sx * 6, -14, 12, 5, 0.3, 0.32, 0.5))
+        bb.add("cableblack" if sx < 0 else "cablegrey", pipe_geo([(sx * 104, -14, -0.2), (sx * 60, -6, -0.2), (sx * 20, 2, -0.2)], 0.5, 1.0, 6.0, 1))
+    bb.emit("SM_Display_BackDetail", back, smooth=("cableblack", "cablegrey"))
     panel = meta(obj("SM_Display_Panel", rbox(0, ya, ACT_W + 6, ACT_H + 10.5, -2.0, 0.4, 1.5), M["panelback"], g),
                  "Display panel",
                  "16-inch QHD+ 2560 × 1600 WVA panel, 165 Hz or 240 Hz, 344.68 × 215.42 mm active area.", (0, 0, 0))
     sx0, sx1 = -ACT_W / 2, ACT_W / 2
     sy0, sy1 = ya - ACT_H / 2, ya + ACT_H / 2
-    sz = -2.06
-    scr = Geo().add([(sx0, sy0, sz), (sx0, sy1, sz), (sx1, sy1, sz), (sx1, sy0, sz)], [[0, 1, 2, 3]])
+    scr = Geo().add([(sx0, sy0, -2.06), (sx0, sy1, -2.06), (sx1, sy1, -2.06), (sx1, sy0, -2.06)], [[0, 1, 2, 3]])
     so = obj("SM_Display_Screen", scr, M["screen"], panel)
     uvl = so.data.uv_layers.new(name="UVMap")
     for lp in so.data.loops:
         co = so.data.vertices[lp.vertex_index].co / S
         uvl.data[lp.index].uv = ((co.x - sx0) / ACT_W, (sy1 - co.y) / ACT_H)
-    obj("SM_Display_eDPFlex", bx(-15, 15, ya + ACT_H / 2 + 2, -6, 0.42, 0.52), M["fpc"], panel)
-
+    pnl = Bag()
+    tcy = sy1 + 2.5
+    pnl.add("pcbdark", rbox(0, tcy, 230, 6, 0.4, 1.0, 0.5))
+    for i, x in enumerate((-80, -30, 30, 80)):
+        pnl.put(P.qfn(4.0, 4.0, 0.6, 6, 6, ["NT71" + str(860 + i)], 0.45), T(x, tcy, 1.0))
+    for i in range(40):
+        pnl.put(P.passive("0201", "mlcc"), T(-105 + i * 5.3, tcy + 2.0, 1.0))
+    pnl.add("fpc", strip([(0, tcy), (0, tcy + 10), (0, -6)], 14, 1.0, 0.1))
+    pnl.add("label", rbox(-90, ya - 30, 70, 22, 0.4, 0.45, 1.0))
+    pnl.add("labeltext", Geo().merge(text_lines(["16.0\" QHD+ 240Hz WVA", "2560x1600  eDP 1.4b", "DP/N 0V3RKR  REV A00"],
+                                                [1.8, 1.4, 1.4], 0.0), T(-90, ya - 26, 0.46)))
+    pnl.add("labeltext", barcode(RNG, -120, ya - 38, 60, 4.0, 0.455))
+    pnl.emit("SM_Display_PanelDetail", panel)
     bez = meta(obj("SM_Display_Bezel", ring(outer, rrect(0, ya, ACT_W + 1.0, ACT_H + 1.0, 1.0, 6), -LT / 2, -2.0),
                    M["bezel"], g, smooth=True), "Display bezel (B-cover)",
-               "Front bezel with the 720p HD webcam.", (0, 0, -40))
-    cam = ring(circle(0, -LL + 4.2, 2.4, 24), circle(0, -LL + 4.2, 1.5, 24), -LT / 2 - 0.08, -LT / 2)
-    obj("SM_Display_WebcamRing", cam, M["plastic"], bez)
-    obj("SM_Display_WebcamLens", cylz(0, -LL + 4.2, -LT / 2 - 0.1, -LT / 2, 1.5, 24), M["lens"], bez)
-
+               "Front bezel with the 720p HD webcam module and rubber bumpers.", (0, 0, -40))
+    bz = Bag()
+    cam_y = -LL + 4.2
+    bz.add("plastic", ring(circle(0, cam_y, 2.4, 24), circle(0, cam_y, 1.5, 24), -LT / 2 - 0.08, -LT / 2))
+    bz.add("lens", cylz(0, cam_y, -LT / 2 - 0.1, -LT / 2, 1.5, 24))
+    bz.add("pcbdark", rbox(0, cam_y, 28, 5.5, -2.0, -1.4, 0.5))
+    bz.add("plastic", cylz(0, cam_y, -3.2, -2.0, 2.6, 20))
+    bz.add("fpc", strip([(10, cam_y), (40, cam_y), (60, cam_y + 3)], 3.0, -1.5, 0.1))
+    for x, y in ((-172, -LL + 6), (172, -LL + 6), (-172, -20), (172, -20)):
+        bz.add("rubber", rbox(x, y, 4.0, 7.0, -LT / 2 - 0.5, -LT / 2, 1.5, 3))
+    bz.emit("SM_Display_BezelDetail", bez, smooth=("lens",))
     obj("SM_Display_HingeCover", cylx(-146, 146, 0, 0, 3.7, 32), M["shell"], g, smooth=True)
-    hinges = Geo()
+    hb = Bag()
     for sx in (-1, 1):
-        hinges.merge(cylx(min(sx * 146, sx * 166), max(sx * 146, sx * 166), 0, 0, 3.2, 24))
-        hinges.merge(bx(min(sx * 148, sx * 164), max(sx * 148, sx * 164), -36, -2, 0.45, 1.6))
-    meta(obj("SM_Display_Hinges", hinges, M["steel"], g, smooth=True, angle=50), "Hinges",
-         "Two steel hinges inside the full-width hinge cover.")
+        a, b = sorted((sx * 146, sx * 166))
+        hb.add("steel", cylx(a, b, 0, 0, 3.2, 24))
+        hb.add("steel", bx(min(sx * 148, sx * 164), max(sx * 148, sx * 164), -36, -2, 0.45, 1.6))
+        for yy in (-10, -22, -32):
+            hb.put(P.screw(1.5, 0.5), T(sx * 156, yy, 1.6))
+        for k in range(3):
+            hb.add("blacksteel", cylx(sx * (147 + k * 1.2) - 0.3, sx * (147 + k * 1.2) + 0.3, 0, 0, 3.6, 24))
+    hg = meta(empty("GRP_Hinges", parent=g), "Hinges", "Two steel friction hinges inside the full-width hinge cover.")
+    hb.emit("SM_Display_Hinges", hg, smooth=("steel",))
     return g
 
 
@@ -926,8 +850,6 @@ def bbox_world(objs):
     mn = Vector((1e9, 1e9, 1e9))
     mx = Vector((-1e9, -1e9, -1e9))
     for o in objs:
-        if o.type != "MESH":
-            continue
         for c in o.bound_box:
             p = o.matrix_world @ Vector(c)
             mn = Vector((min(mn.x, p.x), min(mn.y, p.y), min(mn.z, p.z)))
@@ -938,23 +860,20 @@ def bbox_world(objs):
 def set_explode(on):
     for o in bpy.context.scene.objects:
         if "explode" in o:
-            base = o.get("_base")
-            if base is None:
+            if "_base" not in o:
                 o["_base"] = list(o.location)
-                base = o["_base"]
-            o.location = Vector(base) + (Vector(o["explode"]) if on else Vector((0, 0, 0)))
+            o.location = Vector(o["_base"]) + (Vector(o["explode"]) if on else Vector((0, 0, 0)))
     bpy.context.view_layer.update()
 
 
 def setup_render():
+    from g16_geo import lin, make_mat
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"
     sc.cycles.device = "CPU"
-    sc.cycles.samples = int(os.environ.get("G16_SAMPLES", "40"))
+    sc.cycles.samples = int(os.environ.get("G16_SAMPLES", "32"))
     sc.cycles.use_denoising = True
-    sc.render.resolution_x = 1400
-    sc.render.resolution_y = 1050
-    sc.render.film_transparent = False
+    sc.render.resolution_x, sc.render.resolution_y = 1400, 1050
     world = bpy.data.worlds.new("World")
     sc.world = world
     if world.node_tree is None:
@@ -963,14 +882,12 @@ def setup_render():
     bg.inputs[0].default_value = (*lin("#1b1e25"), 1)
     bg.inputs[1].default_value = 0.35
     collection("COL_RenderOnly")
-    floor = obj("RND_Floor", rbox(0, 0, 6000, 6000, -2.0, -1.7), make_mat("floor", "MAT_Floor", "#15171c", 0, 0.7))
+    obj("RND_Floor", rbox(0, 0, 6000, 6000, -2.0, -1.7), make_mat("floor", "MAT_Floor", "#15171c", 0, 0.7))
     for name, loc, energy, size, color in [("LGT_Key", (-0.9, -1.1, 1.4), 140, 1.2, "#fff4e8"),
                                            ("LGT_Fill", (1.3, -0.6, 0.6), 45, 1.5, "#dfe8ff"),
                                            ("LGT_Rim", (0.4, 1.4, 1.2), 110, 1.0, "#cfe0ff")]:
         ld = bpy.data.lights.new(name, "AREA")
-        ld.energy = energy
-        ld.size = size
-        ld.color = lin(color)
+        ld.energy, ld.size, ld.color = energy, size, lin(color)
         lo = bpy.data.objects.new(name, ld)
         lo.location = loc
         lo.rotation_euler = (Vector((0, 0, 0.2)) - Vector(loc)).to_track_quat("-Z", "Y").to_euler()
@@ -980,12 +897,12 @@ def setup_render():
     cam = bpy.data.objects.new("CAM_Hero", cd)
     CUR["col"].objects.link(cam)
     sc.camera = cam
-    return floor
 
 
-def render_view(path, azim, elev, scale):
+def render_view(path, azim, elev, scale, objs=None):
     sc = bpy.context.scene
-    objs = [o for o in sc.objects if o.type == "MESH" and not o.name.startswith("RND_")]
+    if objs is None:
+        objs = [o for o in sc.objects if o.type == "MESH" and not o.name.startswith("RND_")]
     mn, mx = bbox_world(objs)
     center = (mn + mx) / 2
     radius = (mx - mn).length / 2
@@ -1000,9 +917,6 @@ def render_view(path, azim, elev, scale):
 
 def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    sc = bpy.context.scene
-    sc.unit_settings.system = "METRIC"
-    sc.unit_settings.scale_length = 1.0
     build_materials()
     build_bottom_cover()
     build_thermal()
@@ -1014,17 +928,15 @@ def main():
     build_palmrest()
     build_display()
     bpy.context.view_layer.update()
-
+    sc = bpy.context.scene
     meshes = [o for o in sc.objects if o.type == "MESH"]
     tris = sum(sum(len(p.vertices) - 2 for p in o.data.polygons) for o in meshes)
     print("G16 objects:", len(meshes), "triangles:", tris)
-
     os.makedirs(os.path.join(ROOT, "viewer"), exist_ok=True)
-    glb = os.path.join(ROOT, "viewer", "g16-7630.glb")
+    glb = os.path.join(ROOT, "viewer", "g16-7630.raw.glb")
     bpy.ops.export_scene.gltf(filepath=glb, export_format="GLB", export_extras=True, export_yup=True,
                               export_apply=True, export_cameras=False, export_lights=False)
     print("Exported", glb, os.path.getsize(glb))
-
     if "--render" in ARGV:
         os.makedirs(os.path.join(ROOT, "renders"), exist_ok=True)
         setup_render()
@@ -1039,7 +951,8 @@ def main():
     for o in sc.objects:
         if "_base" in o:
             del o["_base"]
-    bpy.ops.wm.save_as_mainfile(filepath=os.path.join(ROOT, "blender", "g16_7630.blend"), compress=True)
+    if "--no-blend" not in ARGV:
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(ROOT, "blender", "g16_7630.blend"), compress=True)
 
 
 main()

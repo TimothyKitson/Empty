@@ -46,6 +46,23 @@
     outline: none;
   }
   #stage.panning { cursor: move; }
+  #stage.locked { cursor: none; }
+  .crosshair {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+  }
+  .crosshair::before, .crosshair::after {
+    content: "";
+    position: absolute;
+    background: var(--accent);
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+  }
+  .crosshair::before { left: -9px; top: -1px; width: 18px; height: 2px; }
+  .crosshair::after { left: -1px; top: -9px; width: 2px; height: 18px; }
   .brand {
     position: fixed;
     top: calc(16px + env(safe-area-inset-top, 0px));
@@ -342,7 +359,7 @@
 <header class="brand">
   <h1>Dell G16 <span>7630</span></h1>
   <div class="spec">356.98 × 288.73 × 20.2–24.9 mm · 2.73 kg</div>
-  <div class="state" id="state"><i></i><span id="stateText">Orbit follows mouse</span></div>
+  <div class="state" id="state"><i></i><span id="stateText">Click the model to capture the mouse</span></div>
 </header>
 
 <aside class="panel" id="panel">
@@ -397,9 +414,11 @@
 </aside>
 
 <div class="hints" id="hints">
+  <span class="mouse-only"><kbd>Click</kbd>capture mouse</span>
   <span class="mouse-only"><kbd>Move</kbd>orbit</span>
   <span class="mouse-only"><kbd>Hold + drag</kbd>move pivot</span>
   <span class="mouse-only"><kbd>Scroll</kbd>zoom</span>
+  <span class="mouse-only"><kbd>Esc</kbd>release mouse</span>
   <span class="mouse-only"><kbd>Space</kbd>freeze orbit</span>
   <span class="mouse-only"><kbd>Double-click</kbd>pivot on part</span>
   <span class="mouse-only"><kbd>R</kbd>recenter</span>
@@ -409,6 +428,7 @@
 </div>
 
 <div class="tip" id="tip"></div>
+<div class="crosshair" id="crosshair" hidden></div>
 <div class="loading" id="loading"><div><span id="loadingText">Loading model</span><span class="bar"><i id="loadingBar"></i></span></div></div>
 
 <script type="importmap">
@@ -418,6 +438,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
 const $ = (s) => document.querySelector(s);
 const canvas = $('#stage');
@@ -681,7 +702,7 @@ function refreshHighlights() {
     const hov = state.hover && o === state.hover;
     if (sel || hov) {
       m.material.emissive.set(state.accent);
-      m.material.emissiveIntensity = sel ? 0.22 : 0.12;
+      m.material.emissiveIntensity = sel ? 0.1 : 0.05;
     } else {
       m.material.emissive.copy(m.userData.e0);
       m.material.emissiveIntensity = m.userData.ei0;
@@ -765,7 +786,19 @@ function prepare(gltf) {
     o.userData.owner = ownerOf(o);
     o.userData.glow = ['MAT_Key_Legend', 'MAT_LED', 'MAT_Screen'].includes(name);
     if (name === 'MAT_Key_Legend') o.material.side = THREE.DoubleSide;
-    if (o.name === 'SM_Display_Screen') {
+    if (o.name === 'SM_Display_Screen' || (o.parent && o.parent.name === 'SM_Display_Screen')) {
+      const pos = o.geometry.attributes.position;
+      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (let i = 0; i < pos.count; i++) {
+        x0 = Math.min(x0, pos.getX(i)); x1 = Math.max(x1, pos.getX(i));
+        z0 = Math.min(z0, pos.getZ(i)); z1 = Math.max(z1, pos.getZ(i));
+      }
+      const uv = new Float32Array(pos.count * 2);
+      for (let i = 0; i < pos.count; i++) {
+        uv[i * 2] = (pos.getX(i) - x0) / (x1 - x0);
+        uv[i * 2 + 1] = (z1 - pos.getZ(i)) / (z1 - z0);
+      }
+      o.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
       o.material = new THREE.MeshBasicMaterial({ map: screenTex, toneMapped: false });
       o.material.name = 'MAT_Screen';
       o.castShadow = false;
@@ -859,11 +892,89 @@ const touches = new Map();
 let pinch = null;
 let down = null;
 let lastTap = 0;
+let lastClick = 0;
 let pointerAt = null;
 let needsPick = false;
+let locked = false;
+let lockFailed = false;
+let skipMoves = 0;
+const MAX_STEP = 160;
+const clampStep = (v) => Math.max(-MAX_STEP, Math.min(MAX_STEP, v || 0));
+
+function freeCenter() {
+  return { x: (window.innerWidth - panelInset()) / 2, y: window.innerHeight / 2 };
+}
+
+function placeCrosshair() {
+  const c = freeCenter();
+  $('#crosshair').style.transform = `translate(${c.x}px, ${c.y}px)`;
+}
+
+function updateStateText() {
+  const el = $('#stateText');
+  $('#state').classList.toggle('frozen', state.frozen);
+  if (matchMedia('(hover: none)').matches) {
+    el.textContent = 'Drag to orbit';
+  } else if (state.frozen) {
+    el.textContent = 'Orbit frozen · Space to resume';
+  } else if (locked) {
+    el.textContent = 'Mouse captured · Esc to release';
+  } else if (lockFailed) {
+    el.textContent = 'Push the mouse to an edge to keep turning';
+  } else {
+    el.textContent = 'Click the model to capture the mouse';
+  }
+}
+
+function requestLock() {
+  if (lockFailed || !canvas.requestPointerLock) return;
+  const fail = () => { lockFailed = true; updateStateText(); };
+  try {
+    const p = canvas.requestPointerLock({ unadjustedMovement: true });
+    if (p && p.catch) {
+      p.catch(() => {
+        try {
+          const q = canvas.requestPointerLock();
+          if (q && q.catch) q.catch(fail);
+        } catch (err) {
+          fail();
+        }
+      });
+    }
+  } catch (err) {
+    fail();
+  }
+}
+
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === canvas;
+  skipMoves = locked ? 2 : 0;
+  $('#crosshair').hidden = !locked;
+  canvas.classList.toggle('locked', locked);
+  if (locked) {
+    placeCrosshair();
+    pointerAt = freeCenter();
+    needsPick = true;
+  } else {
+    pointerAt = null;
+    state.hover = null;
+    refreshHighlights();
+    hideTip();
+  }
+  updateStateText();
+});
+document.addEventListener('pointerlockerror', () => {
+  lockFailed = true;
+  updateStateText();
+});
+
+function moveCamera(dx, dy, buttons) {
+  if (buttons) pan(dx, dy);
+  else if (!state.frozen) orbit(dx, dy);
+}
 
 canvas.addEventListener('pointerdown', (e) => {
-  canvas.setPointerCapture(e.pointerId);
+  if (!locked) canvas.setPointerCapture(e.pointerId);
   lastPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
   down = { x: e.clientX, y: e.clientY, t: performance.now(), moved: 0 };
   if (e.pointerType === 'mouse') {
@@ -873,25 +984,38 @@ canvas.addEventListener('pointerdown', (e) => {
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     pinch = null;
   }
-  hideTip();
+  if (!locked) hideTip();
 });
 
 canvas.addEventListener('pointermove', (e) => {
-  const prev = lastPos.get(e.pointerId);
-  lastPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (e.pointerType === 'mouse') {
-    pointerAt = { x: e.clientX, y: e.clientY };
-    needsPick = true;
-  }
-  if (!prev) return;
-  const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
-  if (down) down.moved += Math.abs(dx) + Math.abs(dy);
-  if (e.pointerType === 'mouse') {
-    if (e.buttons) pan(dx, dy);
-    else if (!state.frozen) orbit(dx, dy);
+    let dx, dy;
+    if (locked) {
+      if (skipMoves > 0) {
+        skipMoves--;
+        return;
+      }
+      dx = clampStep(e.movementX);
+      dy = clampStep(e.movementY);
+      needsPick = true;
+    } else {
+      const prev = lastPos.get(e.pointerId);
+      lastPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      pointerAt = { x: e.clientX, y: e.clientY };
+      needsPick = true;
+      if (!prev) return;
+      dx = clampStep(e.clientX - prev.x);
+      dy = clampStep(e.clientY - prev.y);
+    }
+    if (down) down.moved += Math.abs(dx) + Math.abs(dy);
+    moveCamera(dx, dy, e.buttons);
     return;
   }
-  if (!touches.has(e.pointerId)) return;
+  const prev = lastPos.get(e.pointerId);
+  lastPos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (!prev || !touches.has(e.pointerId)) return;
+  const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+  if (down) down.moved += Math.abs(dx) + Math.abs(dy);
   touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (touches.size === 1) {
     orbit(dx * 1.3, dy * 1.3);
@@ -911,21 +1035,31 @@ function endPointer(e) {
   pinch = null;
   if (e.pointerType !== 'mouse') lastPos.delete(e.pointerId);
   canvas.classList.remove('panning');
-  if (down && down.moved < 6 && performance.now() - down.t < 450 && e.type === 'pointerup') {
-    const o = pick(e.clientX, e.clientY);
-    const now = performance.now();
-    if (e.pointerType !== 'mouse' && now - lastTap < 320 && o) {
-      focusOn(o);
-    }
-    lastTap = now;
-    select(o);
-  }
+  const isClick = down && down.moved < 6 && performance.now() - down.t < 450 && e.type === 'pointerup';
   down = null;
+  if (!isClick) return;
+  const now = performance.now();
+  if (e.pointerType === 'mouse') {
+    if (!locked) {
+      requestLock();
+      return;
+    }
+    const c = freeCenter();
+    const o = pick(c.x, c.y);
+    if (now - lastClick < 350 && o) focusOn(o);
+    lastClick = now;
+    select(o);
+    return;
+  }
+  const o = pick(e.clientX, e.clientY);
+  if (now - lastTap < 320 && o) focusOn(o);
+  lastTap = now;
+  select(o);
 }
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 canvas.addEventListener('pointerleave', (e) => {
-  if (e.pointerType === 'mouse' && !e.buttons) {
+  if (e.pointerType === 'mouse' && !e.buttons && !locked) {
     lastPos.delete(e.pointerId);
     pointerAt = null;
     state.hover = null;
@@ -934,6 +1068,7 @@ canvas.addEventListener('pointerleave', (e) => {
   }
 });
 canvas.addEventListener('dblclick', (e) => {
+  if (locked) return;
   const o = pick(e.clientX, e.clientY);
   if (o) {
     select(o);
@@ -947,12 +1082,24 @@ canvas.addEventListener('wheel', (e) => {
   zoomBy(Math.exp(e.deltaY * unit * 0.0011));
 }, { passive: false });
 
+function edgeSpin(dt) {
+  if (!lockFailed || locked || !pointerAt || down || state.frozen) return;
+  const w = window.innerWidth - panelInset(), h = window.innerHeight;
+  const bx = Math.max(40, w * 0.07), by = Math.max(40, h * 0.07);
+  const rate = 2.2 * dt / 0.0055;
+  let dx = 0, dy = 0;
+  if (pointerAt.x < bx) dx = -(bx - pointerAt.x) / bx;
+  else if (pointerAt.x > w - bx) dx = (pointerAt.x - (w - bx)) / bx;
+  if (pointerAt.y < by) dy = -(by - pointerAt.y) / by;
+  else if (pointerAt.y > h - by) dy = (pointerAt.y - (h - by)) / by;
+  if (dx || dy) orbit(dx * rate, dy * rate * 0.6);
+}
+
 function setFrozen(v) {
   state.frozen = v;
-  $('#state').classList.toggle('frozen', v);
-  $('#stateText').textContent = v ? 'Orbit frozen · Space to resume' : 'Orbit follows mouse';
+  updateStateText();
 }
-if (matchMedia('(hover: none)').matches) $('#stateText').textContent = 'Drag to orbit';
+updateStateText();
 
 window.addEventListener('keydown', (e) => {
   const inControl = e.target.closest && e.target.closest('button, input');
@@ -961,10 +1108,11 @@ window.addEventListener('keydown', (e) => {
     setFrozen(!state.frozen);
   } else if (e.code === 'KeyR' && !e.metaKey && !e.ctrlKey) {
     recenter();
-  } else if (e.code === 'Escape') {
+  } else if (e.code === 'Escape' && !locked) {
     select(null);
   }
 });
+window.addEventListener('resize', () => { if (locked) placeCrosshair(); });
 
 const tip = $('#tip');
 function showTip(o, x, y) {
@@ -1020,6 +1168,7 @@ if (window.innerWidth <= 720) {
 }
 
 const clock = new THREE.Clock();
+let pickClock = 0;
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   const k = reduceMotion ? 1 : 1 - Math.exp(-dt * 14);
@@ -1050,14 +1199,17 @@ function frame() {
   pivot.scale.setScalar(rig.radius * 0.012);
   pivotPulse = Math.max(0, pivotPulse - dt * 0.9);
   pivotMat.opacity = 0.35 + 0.55 * pivotPulse;
-  if (needsPick && pointerAt && !down) {
+  edgeSpin(dt);
+  pickClock += dt;
+  if (needsPick && pointerAt && !down && pickClock > 0.05) {
     needsPick = false;
+    pickClock = 0;
     const o = pick(pointerAt.x, pointerAt.y);
     if (o !== state.hover) {
       state.hover = o;
       refreshHighlights();
     }
-    if (o) showTip(o, pointerAt.x, pointerAt.y);
+    if (o) showTip(o, pointerAt.x + (locked ? 10 : 0), pointerAt.y + (locked ? 6 : 0));
     else hideTip();
   }
   renderer.render(scene, camera);
@@ -1066,6 +1218,7 @@ function frame() {
 
 resize();
 const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
 function onLoaded(gltf) {
   prepare(gltf);
   resize();

@@ -1,0 +1,8 @@
+[build]
+  publish = "site"
+
+[[headers]]
+  for = "/*.glb"
+  [headers.values]
+    Content-Type = "model/gltf-binary"
+    Cache-Control = "public, max-age=3600"

@@ -1,1 +1,3 @@
 *.blend1
+*.raw.glb
+__pycache__/
