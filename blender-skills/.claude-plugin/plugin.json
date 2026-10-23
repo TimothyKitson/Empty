@@ -1,0 +1,8 @@
+{
+  "name": "blender-skills",
+  "version": "1.0.0",
+  "description": "110 Blender skills: modeling, materials, lighting, rendering, export, art styles and game genres (arjun988/blender-skills) plus product camera animations, PolyHaven scenes, Three.js export and image-to-3D (kevinbadi/blender-skills). Most drive Blender through the Blender MCP add-on.",
+  "author": { "name": "arjun988 and kevinbadi, packaged by Timothy Kitson" },
+  "repository": "https://github.com/arjun988/blender-skills",
+  "license": "MIT"
+}
