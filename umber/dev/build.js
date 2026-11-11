@@ -90,7 +90,7 @@ async function build() {
   const tag = '<script type="module" src="js/main.js"></script>';
   if (!out.includes(tag)) throw new Error('index.html is missing ' + tag);
   out = out.replace(tag, () => blobs + '\n<script type="module">\n' + js + '\n</script>');
-  if (/(href|src)="(css|js|vendor)\//.test(out)) throw new Error('unresolved local reference left in the single-file build');
+  if (/<(link|script)[^>]*(href|src)="(css|js|vendor)\//.test(out)) throw new Error('unresolved local reference left in the single-file build');
 
   fs.mkdirSync(DIST, { recursive: true });
   fs.writeFileSync(path.join(DIST, 'umber.html'), out);
