@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>seam</title>
+</head>
+<body>
+<script type="module">
+import { bus, Emitter } from '../../site/js/core/events.js';
+import { Registry, layerTypes, adjustments, filters, hooks } from '../../site/js/core/registry.js';
+window.seam = { bus, Emitter, Registry, layerTypes, adjustments, filters, hooks };
+window.ready = true;
+</script>
+</body>
+</html>
