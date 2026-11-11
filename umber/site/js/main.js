@@ -4,7 +4,9 @@ import { app, view, initView, invalidate, overlay, setCursor, toScreen } from '.
 import { initTools, setTool, TOOLS, endModal, loadFont } from './tools.js';
 import { buildUI } from './ui.js';
 import { run, MENUS, KEYS, KEYFN, pasteExternal } from './cmds.js';
-import { initIO } from './io.js';
+import { initIO, autosave, pendingAutosaves, restoreAutosaves, clearAutosaves, dropAutosave } from './io.js';
+import { dialog } from './ui.js';
+import { h } from './util.js';
 import { PRESETS, newDoc } from './docs.js';
 
 function combo(ev) {
@@ -150,12 +152,26 @@ function boot() {
   });
   app.isTest = /[?&]test=1/.test(location.search);
   app.api = {
-    run, newDoc, setTool, flatten, render, Layer, emit, invalidate, setCursor, view,
+    run, newDoc, setTool, flatten, render, Layer, emit, invalidate, setCursor, view, autosave,
     pixel: (x, y) => { const c = sample(app.doc, x, y, true); return [c.r, c.g, c.b, c.a]; },
     toClient: (x, y) => { const r = view.stage.getBoundingClientRect(); const p = toScreen(x, y); return { x: r.left + p.x, y: r.top + p.y }; }
   };
   window.app = app;
   app.ready = true;
+  on('docclosed', (d) => dropAutosave(d.id));
+  if (!app.isTest) {
+    setInterval(autosave, 30000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) autosave();
+    });
+    pendingAutosaves().then(async (list) => {
+      if (!list.length) return;
+      const names = list.map((e) => e.name + ' (' + new Date(e.time).toLocaleString() + ')').join(', ');
+      const ok = await dialog('Recover Work', h('div.note', { text: 'Umber kept a copy of work that was not saved: ' + names + '. Open it again?' }), [['Recover', true], ['Discard', null]], { width: 380 });
+      if (ok) restoreAutosaves(list);
+      else clearAutosaves();
+    });
+  }
 }
 
 boot();

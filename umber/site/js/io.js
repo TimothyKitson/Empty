@@ -124,35 +124,112 @@ export async function exportImage(d, o) {
   toast('Exported ' + o.type.toUpperCase());
 }
 
+async function pngOf(owner, key, canvas, ver) {
+  const c = owner[key];
+  if (c && c.ver === ver && c.canvas === canvas) return c.bytes;
+  const bytes = await bytesOf(await toBlob(canvas));
+  owner[key] = { ver, canvas, bytes };
+  return bytes;
+}
+async function packProject(d, preview) {
+  const files = {};
+  const layers = [];
+  let n = 0;
+  for (const l of d.layers) {
+    const e = {
+      id: l.id, name: l.name, type: l.type, visible: l.visible, opacity: l.opacity, blend: l.blend, x: l.x, y: l.y,
+      clip: l.clip, lock: l.lock, text: l.text, fx: l.fx, adj: l.adj
+    };
+    if (l.type !== 'adjust') {
+      e.file = 'layer' + n + '.png';
+      files[e.file] = await pngOf(l, 'pngc', l.canvas, l.ver);
+    }
+    if (l.mask) {
+      e.mask = { x: l.mask.x, y: l.mask.y, on: l.mask.on, file: 'mask' + n + '.png' };
+      files[e.mask.file] = await pngOf(l, 'pngm', l.mask.canvas, l.ver);
+    }
+    layers.push(e);
+    n++;
+  }
+  files['document.json'] = strToU8(JSON.stringify({ app: 'umber', version: 1, name: d.name, w: d.w, h: d.h, dpi: d.dpi, active: d.active, guides: d.guides, layers }));
+  if (preview) files['preview.png'] = await bytesOf(await toBlob(flatten(d)));
+  return zipSync(files, { level: 0 });
+}
+
 export async function saveProject(d) {
   await busy('Saving', async () => {
-    const files = {};
-    const layers = [];
-    let n = 0;
-    for (const l of d.layers) {
-      const e = {
-        id: l.id, name: l.name, type: l.type, visible: l.visible, opacity: l.opacity, blend: l.blend, x: l.x, y: l.y,
-        clip: l.clip, lock: l.lock, text: l.text, fx: l.fx, adj: l.adj
-      };
-      if (l.type !== 'adjust') {
-        e.file = 'layer' + n + '.png';
-        files[e.file] = await bytesOf(await toBlob(l.canvas));
-      }
-      if (l.mask) {
-        e.mask = { x: l.mask.x, y: l.mask.y, on: l.mask.on, file: 'mask' + n + '.png' };
-        files[e.mask.file] = await bytesOf(await toBlob(l.mask.canvas));
-      }
-      layers.push(e);
-      n++;
-    }
-    files['document.json'] = strToU8(JSON.stringify({ app: 'umber', version: 1, name: d.name, w: d.w, h: d.h, dpi: d.dpi, active: d.active, guides: d.guides, layers }));
-    files['preview.png'] = await bytesOf(await toBlob(flatten(d)));
-    const zip = zipSync(files, { level: 0 });
+    const zip = await packProject(d, true);
     download(new Blob([zip], { type: 'application/zip' }), stem(d.name) + '.umber');
     d.dirty = false;
+    dropAutosave(d.id);
     emit('docs');
   });
   toast('Project saved. Open the .umber file later to keep editing with layers.');
+}
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('umber', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('autosave', { keyPath: 'id' });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function store(mode, fn) {
+  try {
+    const db = await idb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction('autosave', mode);
+      const r = fn(tx.objectStore('autosave'));
+      tx.oncomplete = () => resolve(r && r.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn('autosave unavailable', e);
+    return undefined;
+  }
+}
+export function dropAutosave(id) {
+  return store('readwrite', (s) => s.delete(id));
+}
+let saving = false;
+export async function autosave() {
+  if (saving) return;
+  saving = true;
+  try {
+    for (const d of app.docs) {
+      if (!d.dirty || d.savedRev === d.rev || d.w * d.h > 40e6) continue;
+      const rev = d.rev;
+      const bytes = await packProject(d, false);
+      await store('readwrite', (s) => s.put({ id: d.id, name: d.name, time: Date.now(), bytes }));
+      d.savedRev = rev;
+    }
+  } catch (e) {
+    console.warn(e);
+  }
+  saving = false;
+}
+export async function pendingAutosaves() {
+  return (await store('readonly', (s) => s.getAll())) || [];
+}
+export async function restoreAutosaves(list) {
+  for (const e of list) {
+    try {
+      await loadProject(e.bytes, e.name);
+      await dropAutosave(e.id);
+      if (app.doc) {
+        app.doc.dirty = true;
+        app.doc.rev = 1;
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  emit('docs');
+}
+export async function clearAutosaves() {
+  return store('readwrite', (s) => s.clear());
 }
 
 async function loadProject(bytes, name) {
@@ -324,7 +401,4 @@ export function initIO(onPaste) {
   });
 }
 
-export async function autosave() {
-  return null;
-}
 export { renderText };

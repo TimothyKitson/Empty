@@ -1,4 +1,4 @@
-import { mk, cx, clone, clamp, emit, rgba, h } from './util.js';
+import { mk, cx, clone, clamp, emit, rgba, h, bounds } from './util.js';
 import { Layer, cover, flatten, sample, selShape, combineSel, setSel, renderText, bake, fontOf } from './doc.js';
 import { flood } from './fx.js';
 import { app, view, toScreen, setZoom, zoomStep, overlay, handle, dualStroke, setCursor, invalidate } from './view.js';
@@ -336,7 +336,7 @@ export const TOOLS = [
           const lx = Math.floor(e.x - l.x);
           const ly = Math.floor(e.y - l.y);
           if (lx < 0 || ly < 0 || lx >= l.w || ly >= l.h) continue;
-          if (cx(l.canvas).getImageData(lx, ly, 1, 1).data[3] > 8) {
+          if (l.type === 'text' || cx(l.canvas).getImageData(lx, ly, 1, 1).data[3] > 8) {
             if (doc.active !== l.id) {
               doc.active = l.id;
               doc.target = 'layer';
@@ -375,7 +375,7 @@ export const TOOLS = [
         l = d;
         emit('layers');
       }
-      this.m = { mode: 'layer', doc, l, before, sx: e.x, sy: e.y, x0: l.x, y0: l.y, mx: l.mask ? l.mask.x : 0, my: l.mask ? l.mask.y : 0, tx: l.text ? l.text.x : 0, ty: l.text ? l.text.y : 0, dx: 0, dy: 0, dup: e.alt };
+      this.m = { mode: 'layer', doc, l, before, sx: e.x, sy: e.y, x0: l.x, y0: l.y, mx: l.mask ? l.mask.x : 0, my: l.mask ? l.mask.y : 0, tx: l.text ? l.text.x : 0, ty: l.text ? l.text.y : 0, dx: 0, dy: 0, dup: e.alt, cb: contentBox(l) };
     },
     move(e) {
       const m = this.m;
@@ -386,9 +386,16 @@ export const TOOLS = [
         if (Math.abs(dx) > Math.abs(dy)) dy = 0;
         else dx = 0;
       }
+      const l = m.l;
+      this.lines = null;
+      if (m.mode === 'layer' && m.cb && !e.ctrl) {
+        const s = snapBox(m.doc, l, m.x0 + dx + m.cb.x, m.y0 + dy + m.cb.y, m.cb.w, m.cb.h);
+        dx += s.dx;
+        dy += s.dy;
+        this.lines = s.lines;
+      }
       m.dx = dx;
       m.dy = dy;
-      const l = m.l;
       if (m.mode === 'layer') {
         l.x = m.x0 + dx;
         l.y = m.y0 + dy;
@@ -409,9 +416,28 @@ export const TOOLS = [
       }
       m.doc.touch();
     },
+    overlay(g) {
+      if (!this.lines) return;
+      g.strokeStyle = '#ff3fd0';
+      g.lineWidth = 1;
+      g.beginPath();
+      for (const ln of this.lines) {
+        if (ln.v) {
+          const x = Math.round(ln.pos * view.zoom + view.px) + 0.5;
+          g.moveTo(x, 0);
+          g.lineTo(x, view.h);
+        } else {
+          const y = Math.round(ln.pos * view.zoom + view.py) + 0.5;
+          g.moveTo(0, y);
+          g.lineTo(view.w, y);
+        }
+      }
+      g.stroke();
+    },
     up() {
       const m = this.m;
       this.m = null;
+      this.lines = null;
       if (!m) return;
       if (!m.dx && !m.dy && !m.dup) {
         if (m.mode === 'float') m.doc.restore(m.before);
@@ -1047,6 +1073,45 @@ function shape(id, name) {
       g.stroke();
     }
   };
+}
+
+export function contentBox(l) {
+  if (l.type === 'adjust' || l.w * l.h > 24e6) return null;
+  if (!l.cbc || l.cbc.ver !== l.ver) l.cbc = { ver: l.ver, b: bounds(l.canvas) };
+  return l.cbc.b;
+}
+function snapBox(doc, self, x, y, w, hh) {
+  const t = 6 / view.zoom;
+  const xs = [0, doc.w / 2, doc.w];
+  const ys = [0, doc.h / 2, doc.h];
+  for (const g of doc.guides) (g.v ? xs : ys).push(g.pos);
+  let n = 0;
+  for (const l of doc.layers) {
+    if (l === self || !l.visible || l.type === 'adjust' || n > 16 || l.w * l.h > 6e6) continue;
+    const b = contentBox(l);
+    if (!b) continue;
+    n++;
+    xs.push(l.x + b.x, l.x + b.x + b.w / 2, l.x + b.x + b.w);
+    ys.push(l.y + b.y, l.y + b.y + b.h / 2, l.y + b.y + b.h);
+  }
+  const best = (targets, pts) => {
+    let d = null;
+    let pos = 0;
+    for (const p of pts) for (const s of targets) {
+      const v = s - p;
+      if (Math.abs(v) < t && (d == null || Math.abs(v) < Math.abs(d))) {
+        d = v;
+        pos = s;
+      }
+    }
+    return d == null ? null : { d: Math.round(d), pos };
+  };
+  const bx = best(xs, [x, x + w / 2, x + w]);
+  const by = best(ys, [y, y + hh / 2, y + hh]);
+  const lines = [];
+  if (bx) lines.push({ v: true, pos: bx.pos });
+  if (by) lines.push({ v: false, pos: by.pos });
+  return { dx: bx ? bx.d : 0, dy: by ? by.d : 0, lines };
 }
 
 function norm(x0, y0, x1, y1) {

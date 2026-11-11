@@ -56,6 +56,7 @@ export function removeDoc(d) {
   const i = app.docs.indexOf(d);
   if (i < 0) return;
   app.docs.splice(i, 1);
+  emit('docclosed', d);
   if (app.doc === d) {
     app.doc = null;
     activate(app.docs[Math.min(i, app.docs.length - 1)] || null);

@@ -55,6 +55,7 @@ export class Doc {
     this.px = 0;
     this.py = 0;
     this.guides = [];
+    this.rev = 0;
   }
   get al() { return this.layers.find((l) => l.id === this.active) || null; }
   touch(what) {
@@ -113,6 +114,7 @@ export class Doc {
     }
     this.hi = this.hist.length - 1;
     this.dirty = true;
+    this.rev++;
     emit('hist', this);
   }
   commit(name, before) {
@@ -166,6 +168,7 @@ export class Doc {
     if (this.hi < 0) return false;
     this.hist[this.hi].undo();
     this.hi--;
+    this.rev++;
     this.dirty = true;
     emit('hist', this);
     this.touch('all');
@@ -175,6 +178,7 @@ export class Doc {
     if (this.hi >= this.hist.length - 1) return false;
     this.hi++;
     this.hist[this.hi].redo();
+    this.rev++;
     this.dirty = true;
     emit('hist', this);
     this.touch('all');

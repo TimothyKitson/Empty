@@ -2,7 +2,7 @@ import { h, emit, mk, cx, clone, clamp, rgba, pickFiles, loadImage, bounds, isMa
 import { Layer, render, flatten, setSel, selInvert, selGrow, selFeather, renderText, newMask, bake, cover } from './doc.js';
 import { ADJ, FILTERS, defaults, applyAdjust, autoLevels, chamfer, R, C, COL, S } from './fx.js';
 import { app, view, fit, setZoom, zoomStep, invalidate } from './view.js';
-import { paintTarget, startTransform, endModal, editText, cropDoc, setTool, TOOLS } from './tools.js';
+import { paintTarget, startTransform, endModal, editText, cropDoc, setTool, TOOLS, contentBox } from './tools.js';
 import { dialog, form, toast, pickColor } from './ui.js';
 import { PRESETS, activate, addDoc, removeDoc, newDoc, busy } from './docs.js';
 import { openFiles, saveProject, exportImage, exportPsd, printDoc, placeCanvas } from './io.js';
@@ -669,6 +669,53 @@ function mergeLayers(d, list, name) {
   return out;
 }
 
+function align(kind) {
+  const d = doc();
+  const l = d && d.al;
+  if (!l || l.lock) return;
+  const b = contentBox(l);
+  if (!b) return;
+  const r = d.sel ? d.sel.b : { x: 0, y: 0, w: d.w, h: d.h };
+  let dx = 0;
+  let dy = 0;
+  if (kind === 'left') dx = r.x - (l.x + b.x);
+  else if (kind === 'hcenter') dx = r.x + r.w / 2 - (l.x + b.x + b.w / 2);
+  else if (kind === 'right') dx = r.x + r.w - (l.x + b.x + b.w);
+  else if (kind === 'top') dy = r.y - (l.y + b.y);
+  else if (kind === 'vcenter') dy = r.y + r.h / 2 - (l.y + b.y + b.h / 2);
+  else dy = r.y + r.h - (l.y + b.y + b.h);
+  dx = Math.round(dx);
+  dy = Math.round(dy);
+  if (!dx && !dy) return;
+  d.act('Align', () => {
+    l.x += dx;
+    l.y += dy;
+    if (l.mask) l.mask = { ...l.mask, x: l.mask.x + dx, y: l.mask.y + dy };
+    if (l.text) {
+      l.text.x += dx;
+      l.text.y += dy;
+    }
+  });
+}
+async function newGuide() {
+  const d = doc();
+  const v = { dir: 'v', pos: Math.round(d.w / 2) };
+  const ok = await dialog('New Guide', form([S('dir', 'Orientation', [['v', 'Vertical'], ['h', 'Horizontal']], 'v'), { k: 'pos', label: 'Position (px)', type: 'text' }], v, () => {}), undefined, { width: 320 });
+  if (!ok) return;
+  const pos = parseFloat(v.pos);
+  if (Number.isNaN(pos)) return;
+  d.guides.push({ v: v.dir === 'v', pos });
+  invalidate();
+}
+async function marginGuides() {
+  const d = doc();
+  const n = await ask('Margin Guides', 'Margin (px)', Math.round(d.dpi * 0.5), 0, Math.round(Math.min(d.w, d.h) / 2));
+  if (n == null) return;
+  d.guides.push({ v: true, pos: n }, { v: true, pos: d.w - n }, { v: false, pos: n }, { v: false, pos: d.h - n });
+  invalidate();
+  toast('Guides added ' + (n / d.dpi).toFixed(2) + ' in from each edge.');
+}
+
 const SHORTCUTS = [
   ['Tools', 'V Move · M Marquee · L Lasso · W Magic Wand · C Crop · I Eyedropper · J Spot Healing · B Brush · S Clone Stamp · E Eraser · G Gradient / Paint Bucket · O Dodge / Burn · T Type · U Shapes · H Hand · Z Zoom'],
   ['Painting', '[ and ] change brush size · Shift+[ and Shift+] change hardness · number keys set opacity · Alt-click samples a color · Shift-click draws a straight line · X swaps colors · D resets them'],
@@ -1060,6 +1107,20 @@ const CMD = {
     else document.documentElement.requestFullscreen().catch(() => {});
   },
   panels: () => document.body.classList.toggle('nopanels'),
+  align,
+  newGuide: () => doc() && newGuide(),
+  marginGuides: () => doc() && marginGuides(),
+  centerGuides: () => {
+    const d = doc();
+    if (!d) return;
+    d.guides.push({ v: true, pos: d.w / 2 }, { v: false, pos: d.h / 2 });
+    invalidate();
+  },
+  clearGuides: () => {
+    if (!doc()) return;
+    doc().guides = [];
+    invalidate();
+  },
   swap: () => {
     [app.fg, app.bg] = [app.bg, app.fg];
     emit('color');
@@ -1135,6 +1196,7 @@ export const MENUS = [
       { label: 'Layer Mask', sub: [I('Reveal All', 'addMask', '', () => !!l && !l.mask), I('Hide All', 'maskHide', '', () => !!l && !l.mask), '-', I(l && l.mask && !l.mask.on ? 'Enable' : 'Disable', 'maskToggle', '', () => !!(l && l.mask)), I('Apply', 'applyMask', '', () => !!(l && l.mask)), I('Delete', 'delMask', '', () => !!(l && l.mask))] },
       I(l && l.clip ? 'Release Clipping Mask' : 'Create Clipping Mask', 'clipToggle', 'Alt+Ctrl+G'), I('Rasterize Type', 'rasterize', '', () => !!(l && l.type === 'text')), '-',
       { label: 'Arrange', sub: [{ label: 'Bring to Front', key: 'Shift+Ctrl+]', on: has, run: () => run('arrange', 'front') }, { label: 'Bring Forward', key: 'Ctrl+]', on: has, run: () => run('arrange', 'up') }, { label: 'Send Backward', key: 'Ctrl+[', on: has, run: () => run('arrange', 'down') }, { label: 'Send to Back', key: 'Shift+Ctrl+[', on: has, run: () => run('arrange', 'back') }] }, '-',
+      { label: 'Align', sub: [['Left Edges', 'left'], ['Horizontal Centers', 'hcenter'], ['Right Edges', 'right'], null, ['Top Edges', 'top'], ['Vertical Centers', 'vcenter'], ['Bottom Edges', 'bottom']].map((a) => (a ? { label: a[0], on: has, run: () => run('align', a[1]) } : '-')) }, '-',
       I('Merge Down', 'mergeDown', 'Ctrl+E'), I('Merge Visible', 'mergeVisible', 'Shift+Ctrl+E'), I('Flatten Image', 'flatten')
     ];
   } },
@@ -1145,6 +1207,7 @@ export const MENUS = [
   { id: 'filter', label: 'Filter', items: () => [{ label: 'Last Filter', cmd: 'lastFilter', key: 'Alt+Ctrl+F', on: () => !!(doc() && app.lastFilter) }, '-', ...filterItems()] },
   { id: 'view', label: 'View', items: () => [
     I('Zoom In', 'zoomIn', 'Ctrl+='), I('Zoom Out', 'zoomOut', 'Ctrl+-'), I('Fit on Screen', 'fit', 'Ctrl+0'), I('100%', 'actual', 'Ctrl+1'), '-',
+    I('New Guide…', 'newGuide'), I('Center Guides', 'centerGuides'), I('Margin Guides…', 'marginGuides'), I('Clear Guides', 'clearGuides'), '-',
     { label: 'Full Screen', cmd: 'fullscreen', key: 'F' }, { label: 'Show/Hide Panels', cmd: 'panels', key: 'Tab' }
   ] },
   { id: 'help', label: 'Help', items: () => [{ label: 'Keyboard Shortcuts…', cmd: 'shortcuts' }, { label: 'About Umber…', cmd: 'about' }] }
