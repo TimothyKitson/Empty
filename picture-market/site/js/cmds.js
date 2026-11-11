@@ -729,7 +729,7 @@ const SHORTCUTS = [
 const CMD = {
   new: newDialog,
   newPreset: (p) => newDoc({ w: p.w, h: p.h, dpi: p.dpi }),
-  open: async () => openFiles(await pickFiles('image/*,.umber,.psd,.zip', true), false),
+  open: async () => openFiles(await pickFiles('image/*,.picproj,.umber,.psd,.zip', true), false),
   place: async () => openFiles(await pickFiles('image/*', true), true),
   save: () => doc() && saveProject(doc()),
   exportAs: () => doc() && exportDialog(),
@@ -1131,9 +1131,9 @@ const CMD = {
     emit('color');
   },
   shortcuts: () => dialog('Keyboard Shortcuts', h('div.help', null, SHORTCUTS.map(([t, s]) => h('div.hsec', null, h('b', { text: t }), h('p', { text: isMac ? s.replace(/Ctrl/g, 'Cmd').replace(/Alt/g, 'Option') : s })))), [['Close', true]], { width: 560 }),
-  about: () => dialog('About Umber', h('div.help', null,
-    h('p', { text: 'Umber is a layered photo editor that runs entirely in your browser. Nothing you open is uploaded anywhere.' }),
-    h('p', { text: 'Save Project keeps your layers in a .umber file you can reopen here. Export makes PNG, JPEG, WebP, PDF or PSD files, with the document resolution written into PNG, JPEG and PDF for printing.' }),
+  about: () => dialog('About Picture Market', h('div.help', null,
+    h('p', { text: 'Picture Market is a layered photo editor that runs entirely in your browser. Nothing you open is uploaded anywhere.' }),
+    h('p', { text: 'Save Project keeps your layers in a .picproj file you can reopen here. Export makes PNG, JPEG, WebP, PDF or PSD files, with the document resolution written into PNG, JPEG and PDF for printing.' }),
     h('p', { text: 'Colors are RGB, 8 bits per channel.' })), [['Close', true]], { width: 420 })
 };
 
@@ -1210,7 +1210,7 @@ export const MENUS = [
     I('New Guide…', 'newGuide'), I('Center Guides', 'centerGuides'), I('Margin Guides…', 'marginGuides'), I('Clear Guides', 'clearGuides'), '-',
     { label: 'Full Screen', cmd: 'fullscreen', key: 'F' }, { label: 'Show/Hide Panels', cmd: 'panels', key: 'Tab' }
   ] },
-  { id: 'help', label: 'Help', items: () => [{ label: 'Keyboard Shortcuts…', cmd: 'shortcuts' }, { label: 'About Umber…', cmd: 'about' }] }
+  { id: 'help', label: 'Help', items: () => [{ label: 'Keyboard Shortcuts…', cmd: 'shortcuts' }, { label: 'About Picture Market…', cmd: 'about' }] }
 ];
 
 export const KEYS = {

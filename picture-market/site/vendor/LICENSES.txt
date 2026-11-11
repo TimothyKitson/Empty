@@ -1,4 +1,4 @@
-Third-party libraries bundled with Umber
+Third-party libraries bundled with Picture Market
 
 ================ ag-psd 34.1.0 ================
 The MIT License (MIT)

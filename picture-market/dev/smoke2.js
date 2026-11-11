@@ -215,7 +215,7 @@ const { serve } = require('./serve');
     await ch.setFiles(file);
     await settle(1500);
   };
-  const proj = await dl('save', 'two.umber');
+  const proj = await dl('save', 'two.picproj');
   await open(proj);
   const after = await layers();
   check('project round trip keeps layers', after.length === before.length && after.map((l) => l.type).join() === before.map((l) => l.type).join(), [before.length, after.length]);

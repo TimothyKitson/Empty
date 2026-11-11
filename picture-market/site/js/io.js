@@ -151,7 +151,7 @@ async function packProject(d, preview) {
     layers.push(e);
     n++;
   }
-  files['document.json'] = strToU8(JSON.stringify({ app: 'umber', version: 1, name: d.name, w: d.w, h: d.h, dpi: d.dpi, active: d.active, guides: d.guides, layers }));
+  files['document.json'] = strToU8(JSON.stringify({ app: 'picture-market', version: 1, name: d.name, w: d.w, h: d.h, dpi: d.dpi, active: d.active, guides: d.guides, layers }));
   if (preview) files['preview.png'] = await bytesOf(await toBlob(flatten(d)));
   return zipSync(files, { level: 0 });
 }
@@ -159,17 +159,17 @@ async function packProject(d, preview) {
 export async function saveProject(d) {
   await busy('Saving', async () => {
     const zip = await packProject(d, true);
-    download(new Blob([zip], { type: 'application/zip' }), stem(d.name) + '.umber');
+    download(new Blob([zip], { type: 'application/zip' }), stem(d.name) + '.picproj');
     d.dirty = false;
     dropAutosave(d.id);
     emit('docs');
   });
-  toast('Project saved. Open the .umber file later to keep editing with layers.');
+  toast('Project saved. Open the .picproj file later to keep editing with layers.');
 }
 
 function idb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('umber', 1);
+    const req = indexedDB.open('picture-market', 1);
     req.onupgradeneeded = () => req.result.createObjectStore('autosave', { keyPath: 'id' });
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -234,7 +234,7 @@ export async function clearAutosaves() {
 
 async function loadProject(bytes, name) {
   const files = unzipSync(bytes);
-  if (!files['document.json']) throw new Error('This file is not an Umber project.');
+  if (!files['document.json']) throw new Error('This file is not a Picture Market project.');
   const m = JSON.parse(strFromU8(files['document.json']));
   const d = new Doc(m.w, m.h, m.dpi, stem(name || m.name));
   d.guides = m.guides || [];
@@ -341,7 +341,7 @@ export async function openFiles(files, asLayer) {
         const head = new Uint8Array(await f.slice(0, 8).arrayBuffer());
         const isZip = head[0] === 0x50 && head[1] === 0x4b;
         const isPsd = head[0] === 0x38 && head[1] === 0x42 && head[2] === 0x50 && head[3] === 0x53;
-        if (isZip || /\.umber$/i.test(f.name)) await loadProject(new Uint8Array(await f.arrayBuffer()), f.name);
+        if (isZip || /\.(picproj|umber)$/i.test(f.name)) await loadProject(new Uint8Array(await f.arrayBuffer()), f.name);
         else if (isPsd) await importPsd(await f.arrayBuffer(), f.name);
         else {
           const c = await loadImage(f);

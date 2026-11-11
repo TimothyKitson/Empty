@@ -167,7 +167,7 @@ function boot() {
     pendingAutosaves().then(async (list) => {
       if (!list.length) return;
       const names = list.map((e) => e.name + ' (' + new Date(e.time).toLocaleString() + ')').join(', ');
-      const ok = await dialog('Recover Work', h('div.note', { text: 'Umber kept a copy of work that was not saved: ' + names + '. Open it again?' }), [['Recover', true], ['Discard', null]], { width: 380 });
+      const ok = await dialog('Recover Work', h('div.note', { text: 'Picture Market kept a copy of work that was not saved: ' + names + '. Open it again?' }), [['Recover', true], ['Discard', null]], { width: 380 });
       if (ok) restoreAutosaves(list);
       else clearAutosaves();
     });

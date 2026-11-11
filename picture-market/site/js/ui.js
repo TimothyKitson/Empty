@@ -384,7 +384,7 @@ export async function pickColor(color, title = 'Color Picker') {
 
 function buildMenubar() {
   const bar = els.menubar;
-  bar.replaceChildren(h('div.brand', null, h('span.mark'), h('span', { text: 'Umber' })));
+  bar.replaceChildren(h('div.brand', null, h('span.mark'), h('span.bname', { text: 'Picture Market' })));
   const mobile = h('button.mobmenu', { title: 'Menu', onclick: (ev) => {
     const r = ev.currentTarget.getBoundingClientRect();
     popup(menus.map((m) => ({ label: m.label, sub: m.items() })), r.left, r.bottom);
@@ -827,7 +827,7 @@ export function buildUI(root, opts) {
 function buildWelcome(opts) {
   const presets = opts.presets;
   els.welcome.append(h('div.wbox', null,
-    h('div.wtitle', null, h('span.mark.big'), h('span', { text: 'Umber' })),
+    h('div.wtitle', null, h('span.mark.big'), h('span.bname', { text: 'Picture Market' })),
     h('div.wsub', { text: 'Photo editor with layers, selections, type and print-ready export.' }),
     h('div.wbtns', null,
       h('button.btn.primary.big', { text: 'New Document…', onclick: () => cmdRun('new') }),

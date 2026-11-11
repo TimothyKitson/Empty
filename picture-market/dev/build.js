@@ -93,15 +93,15 @@ async function build() {
   if (/<(link|script)[^>]*(href|src)="(css|js|vendor)\//.test(out)) throw new Error('unresolved local reference left in the single-file build');
 
   fs.mkdirSync(DIST, { recursive: true });
-  fs.writeFileSync(path.join(DIST, 'umber.html'), out);
+  fs.writeFileSync(path.join(DIST, 'picture-market.html'), out);
   const licenses = fs.readFileSync(path.join(SITE, 'vendor', 'LICENSES.txt'));
-  fs.writeFileSync(path.join(DIST, 'umber-netlify.zip'), zip([
+  fs.writeFileSync(path.join(DIST, 'picture-market-netlify.zip'), zip([
     { name: 'index.html', data: Buffer.from(out, 'utf8') },
     { name: 'LICENSES.txt', data: licenses }
   ]));
   const size = (f) => (fs.statSync(path.join(DIST, f)).size / 1024).toFixed(0) + ' KB';
-  console.log('dist/umber.html ' + size('umber.html'));
-  console.log('dist/umber-netlify.zip ' + size('umber-netlify.zip'));
+  console.log('dist/picture-market.html ' + size('picture-market.html'));
+  console.log('dist/picture-market-netlify.zip ' + size('picture-market-netlify.zip'));
 }
 
 build().catch((e) => {
