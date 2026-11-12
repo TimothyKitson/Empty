@@ -1,8 +1,8 @@
 import { h, emit, mk, cx, clone, clamp, rgba, pickFiles, loadImage, bounds, isMac } from './util.js';
 import { Layer, render, flatten, setSel, selInvert, selGrow, selFeather, renderText, newMask, bake, cover } from './doc.js';
-import { ADJ, FILTERS, defaults, applyAdjust, autoLevels, chamfer, R, C, COL, S } from './fx.js';
+import { ADJ, FILTERS, defaults, applyAdjust, autoLevels, chamfer, deconPaint, R, C, COL, S } from './fx.js';
 import { app, view, fit, setZoom, zoomStep, invalidate } from './view.js';
-import { paintTarget, startTransform, endModal, editText, cropDoc, setTool, TOOLS, contentBox } from './tools.js';
+import { paintTarget, startTransform, endModal, editText, cropDoc, setTool, TOOLS, contentBox, deconFor, deconStamp } from './tools.js';
 import { dialog, form, toast, pickColor } from './ui.js';
 import { PRESETS, activate, addDoc, removeDoc, newDoc, busy } from './docs.js';
 import { openFiles, saveProject, exportImage, exportPsd, printDoc, placeCanvas } from './io.js';
@@ -473,11 +473,13 @@ function copySel(merged) {
   }
   if (d.sel) {
     const b = d.sel.b;
+    const k = merged ? null : deconFor(d, l);
     const o = mk(b.w, b.h);
     const g = cx(o);
     g.drawImage(c, x - b.x, y - b.y);
     g.globalCompositeOperation = 'destination-in';
     g.drawImage(d.sel.c, -b.x, -b.y);
+    if (k) deconStamp(o, b.x, b.y, d.w, k, deconPaint(k, 'lift'));
     c = o;
     x = b.x;
     y = b.y;
@@ -508,6 +510,7 @@ function clearSel(name = 'Clear') {
   }
   const tg = paintTarget(d);
   if (!tg) return;
+  const k = tg.key === 'canvas' ? deconFor(d, tg.l) : null;
   const ps = d.beginPaint(tg.l, tg.key);
   const c = tg.key === 'mask' ? tg.l.mask.canvas : tg.l.canvas;
   const off = tg.key === 'mask' ? tg.l.mask : tg.l;
@@ -516,6 +519,7 @@ function clearSel(name = 'Clear') {
   g.globalCompositeOperation = 'destination-out';
   g.drawImage(d.sel.c, -off.x, -off.y);
   g.restore();
+  if (k) deconStamp(c, off.x, off.y, d.w, k, deconPaint(k, 'clear'));
   tg.l.ver++;
   d.endPaint(name, ps, { x: d.sel.b.x - off.x, y: d.sel.b.y - off.y, w: d.sel.b.w, h: d.sel.b.h });
 }
@@ -558,6 +562,7 @@ function fillWith(color, opacity = 1, name = 'Fill') {
   const d = doc();
   const tg = paintTarget(d);
   if (!tg) return;
+  const k = d.sel && tg.key === 'canvas' ? deconFor(d, tg.l) : null;
   const ps = d.beginPaint(tg.l, tg.key);
   const c = tg.key === 'mask' ? tg.l.mask.canvas : tg.l.canvas;
   const off = tg.key === 'mask' ? tg.l.mask : tg.l;
@@ -576,6 +581,7 @@ function fillWith(color, opacity = 1, name = 'Fill') {
   if (tg.key === 'mask' && lum < 128) lg.globalCompositeOperation = 'destination-out';
   lg.drawImage(t, 0, 0);
   lg.restore();
+  if (k) deconStamp(c, off.x, off.y, d.w, k, deconPaint(k, 'fill', color, opacity));
   tg.l.ver++;
   d.endPaint(name, ps, { x: 0, y: 0, w: c.width, h: c.height });
 }
@@ -829,6 +835,7 @@ const CMD = {
     const tg = paintTarget(d);
     if (!tg || tg.key !== 'canvas') return;
     const c = copySel(false);
+    const k = deconFor(d, tg.l);
     d.act('Layer Via Cut', () => {
       const l = tg.l;
       cover(d, l);
@@ -836,6 +843,7 @@ const CMD = {
       const g = cx(n);
       g.globalCompositeOperation = 'destination-out';
       g.drawImage(d.sel.c, -l.x, -l.y);
+      if (k) deconStamp(n, l.x, l.y, d.w, k, deconPaint(k, 'clear'));
       l.canvas = n;
       l.ver++;
       d.add(new Layer({ name: d.newName(), canvas: c.canvas, x: c.x, y: c.y }));

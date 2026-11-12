@@ -1,5 +1,5 @@
 import { mk, cx, clone, crop, uid, emit, bounds, clamp, rgba } from './util.js';
-import { applyAdjust, blurCanvas, chamfer } from './fx.js';
+import { applyAdjust, blurCanvas, chamfer, deconInvert } from './fx.js';
 
 export const BLENDS = [
   ['normal', 'Normal'], null,
@@ -423,11 +423,11 @@ export function sample(doc, x, y, merged = true) {
   return { r: d[0], g: d[1], b: d[2], a: d[3] };
 }
 
-export function setSel(doc, c) {
+export function setSel(doc, c, b, decon) {
   doc.sel = null;
   if (c) {
-    const b = bounds(c);
-    if (b) doc.sel = { c, b, path: null };
+    const r = b === undefined ? bounds(c) : b;
+    if (r && r.w > 0 && r.h > 0) doc.sel = { c, b: r, path: null, decon: decon || null };
   }
   emit('sel', doc);
 }
@@ -460,11 +460,12 @@ export function selInvert(doc) {
   const g = cx(c);
   g.fillStyle = '#fff';
   g.fillRect(0, 0, doc.w, doc.h);
+  const k = doc.sel && doc.sel.decon;
   if (doc.sel) {
     g.globalCompositeOperation = 'destination-out';
     g.drawImage(doc.sel.c, 0, 0);
   }
-  setSel(doc, c);
+  setSel(doc, c, undefined, k ? deconInvert(k) : null);
 }
 
 export function selGrow(doc, n) {

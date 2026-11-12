@@ -1,6 +1,6 @@
-import { mk, cx, clone, clamp, emit, rgba, h, bounds } from './util.js';
-import { Layer, cover, flatten, sample, selShape, combineSel, setSel, renderText, bake, fontOf } from './doc.js';
-import { flood } from './fx.js';
+import { mk, cx, clone, crop, clamp, emit, on, rgba, h, bounds } from './util.js';
+import { Layer, cover, flatten, sample, selShape, setSel, renderText, bake, fontOf } from './doc.js';
+import { wandSelect, wandSeed, wandMix, wandSum, deconPaint, deconJoin } from './fx.js';
 import { app, view, toScreen, setZoom, zoomStep, overlay, handle, dualStroke, setCursor, invalidate } from './view.js';
 
 const R = (k, label, min, max, v, unit) => ({ k, label, min, max, v, unit, type: 'range' });
@@ -18,6 +18,7 @@ const union = (a, b) => {
 };
 const selMode = (e, id) => (e.shift && e.alt ? 'int' : e.shift ? 'add' : e.alt ? 'sub' : O(id).mode || 'new');
 const MODES = [['new', 'New selection'], ['add', 'Add to selection'], ['sub', 'Subtract from selection'], ['int', 'Intersect with selection']];
+const SAMPLES = [['1', 'Point Sample'], ['3', '3 by 3 Average'], ['5', '5 by 5 Average'], ['11', '11 by 11 Average']];
 
 export const FONTS = ['Arial', 'Georgia', 'Times New Roman', 'Courier New', 'Verdana', 'Trebuchet MS', 'Impact', 'Comic Sans MS',
   'Inter', 'Roboto', 'Open Sans', 'Montserrat', 'Poppins', 'Lato', 'Oswald', 'Raleway', 'Nunito', 'Quicksand', 'Josefin Sans', 'Bebas Neue', 'Anton', 'Archivo Black',
@@ -354,17 +355,21 @@ export const TOOLS = [
       }
       const before = doc.snap();
       if (doc.sel && l.type === 'raster') {
+        const k = deconFor(doc, l);
         cover(doc, l);
         const src = l.canvas;
         const float = clone(src);
         const fg = cx(float);
         fg.globalCompositeOperation = 'destination-in';
         fg.drawImage(doc.sel.c, -l.x, -l.y);
+        if (k) deconStamp(float, l.x, l.y, doc.w, k, deconPaint(k, 'lift'));
         const hole = clone(src);
-        const hg = cx(hole);
-        hg.globalCompositeOperation = 'destination-out';
-        hg.drawImage(doc.sel.c, -l.x, -l.y);
-        if (e.alt) cx(hole).drawImage(float, 0, 0);
+        if (!e.alt) {
+          const hg = cx(hole);
+          hg.globalCompositeOperation = 'destination-out';
+          hg.drawImage(doc.sel.c, -l.x, -l.y);
+          if (k) deconStamp(hole, l.x, l.y, doc.w, k, deconPaint(k, 'clear'));
+        }
         l.canvas = clone(src);
         this.m = { mode: 'float', doc, l, before, float, hole, sx: e.x, sy: e.y, dx: 0, dy: 0 };
         return;
@@ -573,15 +578,23 @@ export const TOOLS = [
   },
   {
     id: 'wand', name: 'Magic Wand Tool', k: 'W', cursor: 'crosshair',
-    opts: [S('mode', 'Mode', MODES, 'new'), R('tolerance', 'Tolerance', 0, 255, 32), C('contiguous', 'Contiguous', true), C('all', 'Sample All Layers', false)],
+    opts: [S('mode', 'Mode', MODES, 'new'), S('sample', 'Sample Size', SAMPLES, '1'), R('tolerance', 'Tolerance', 0, 255, 32), C('aa', 'Anti-alias', true),
+      C('contiguous', 'Contiguous', true), C('all', 'Sample All Layers', false)],
+    stats: null,
     down(e) {
       const doc = app.doc;
       const o = O('wand');
       if (e.x < 0 || e.y < 0 || e.x >= doc.w || e.y >= doc.h) return;
+      const t0 = performance.now();
+      const reads = pixReads;
       const img = docPixels(doc, o.all);
-      const m = flood(img, e.x, e.y, o.tolerance, o.contiguous);
+      const t1 = performance.now();
+      const s = wandPick(img, e.x, e.y, { tolerance: o.tolerance, contiguous: o.contiguous, antialias: o.aa, sample: Number(o.sample) || 1 });
+      const t2 = performance.now();
       const mode = selMode(e, 'wand');
-      doc.act('Magic Wand', () => combineSel(doc, maskCanvas(m, doc.w, doc.h), mode, 0));
+      doc.act('Magic Wand', () => wandCombine(doc, s, mode, img, o.all));
+      keepPixels(doc, img, o.all);
+      this.stats = { ms: performance.now() - t0, read: pixReads !== reads, load: t1 - t0, select: t2 - t1, reused: s.reused };
     }
   },
   {
@@ -844,28 +857,34 @@ export const TOOLS = [
   },
   {
     id: 'bucket', name: 'Paint Bucket Tool', k: 'G', cursor: 'crosshair',
-    opts: [R('tolerance', 'Tolerance', 0, 255, 32), R('opacity', 'Opacity', 1, 100, 100, '%'), C('contiguous', 'Contiguous', true), C('all', 'All Layers', false)],
+    opts: [R('tolerance', 'Tolerance', 0, 255, 32), R('opacity', 'Opacity', 1, 100, 100, '%'), C('aa', 'Anti-alias', true), C('contiguous', 'Contiguous', true), C('all', 'All Layers', false)],
     down(e) {
       const doc = app.doc;
       const tg = paintTarget(doc);
       if (!tg || tg.key === 'mask') return;
       if (e.x < 0 || e.y < 0 || e.x >= doc.w || e.y >= doc.h) return;
       const o = O('bucket');
-      const m = flood(docPixels(doc, o.all), e.x, e.y, o.tolerance, o.contiguous);
-      const fill = maskCanvas(m, doc.w, doc.h, app.fg);
-      if (doc.sel) {
-        const g = cx(fill);
-        g.globalCompositeOperation = 'destination-in';
-        g.drawImage(doc.sel.c, 0, 0);
-      }
+      const img = docPixels(doc, o.all);
+      const s = wandSelect(img, e.x, e.y, { tolerance: o.tolerance, contiguous: o.contiguous, antialias: o.aa });
+      const b = s.b;
+      if (!b) return;
+      const k = s.est && sampled(doc, o.all) === tg.l ? s.est : null;
+      const clip = k && doc.sel ? covAt(doc.sel.c, k.idx, doc.w, b) : null;
       const ps = doc.beginPaint(tg.l);
+      const fill = maskCanvas(s.cov, doc.w, doc.h, app.fg, b);
+      if (doc.sel) {
+        const fg = cx(fill);
+        fg.globalCompositeOperation = 'destination-in';
+        fg.drawImage(doc.sel.c, 0, 0);
+      }
       const g = cx(tg.l.canvas);
       g.save();
       g.globalAlpha = o.opacity / 100;
       g.drawImage(fill, -tg.l.x, -tg.l.y);
       g.restore();
+      if (k) deconStamp(tg.l.canvas, tg.l.x, tg.l.y, doc.w, k, deconPaint(k, 'fill', app.fg, o.opacity / 100, clip));
       tg.l.ver++;
-      doc.endPaint('Paint Bucket', ps, { x: -tg.l.x, y: -tg.l.y, w: doc.w, h: doc.h });
+      doc.endPaint('Paint Bucket', ps, { x: b.x - tg.l.x, y: b.y - tg.l.y, w: b.w, h: b.h });
     }
   },
   {
@@ -1169,27 +1188,190 @@ export function cropDoc(doc, x, y, w, hh) {
   doc.h = hh;
 }
 
+let pix = null;
+let pixReads = 0;
+on('docclosed', (d) => {
+  if (!pix || !d || pix.doc !== d.id) return;
+  pix = null;
+  picked = null;
+});
+function pixKey(doc, flat) {
+  const part = (l) => [l.id, l.ver, l.x, l.y, l.w, l.h, l.visible, l.opacity, l.blend, l.clip, l.mask ? [l.mask.on, l.mask.x, l.mask.y] : 0, l.fx, l.adj, l.tm];
+  return JSON.stringify([doc.id, doc.rev, doc.w, doc.h, flat, flat ? doc.layers.map(part) : part(doc.al)]);
+}
+const isFlat = (doc, merged) => !!(merged || !doc.al || doc.al.type === 'adjust');
+function keepPixels(doc, img, merged) {
+  if (pix && pix.img === img) pix.key = pixKey(doc, isFlat(doc, merged));
+}
 export function docPixels(doc, merged) {
-  let c;
   const l = doc.al;
-  if (merged || !l || l.type === 'adjust') c = flatten(doc);
+  const flat = isFlat(doc, merged);
+  const key = pixKey(doc, flat);
+  if (pix && pix.key === key) return pix.img;
+  pix = null;
+  let c;
+  if (flat) c = flatten(doc);
+  else if (!l.x && !l.y && l.w === doc.w && l.h === doc.h) c = l.canvas;
   else {
     c = mk(doc.w, doc.h);
-    cx(c).drawImage(l.canvas, l.x, l.y);
+    cx(c, { willReadFrequently: true }).drawImage(l.canvas, l.x, l.y);
   }
-  return cx(c).getImageData(0, 0, doc.w, doc.h);
+  const img = cx(c).getImageData(0, 0, doc.w, doc.h);
+  pixReads++;
+  pix = { key, img, doc: doc.id };
+  if (picked && picked.img !== img) picked = null;
+  return img;
 }
-export function maskCanvas(m, w, hh, color) {
-  const img = new ImageData(w, hh);
-  const d = new Uint32Array(img.data.buffer);
-  const c = color || { r: 255, g: 255, b: 255 };
-  const v = (255 << 24) | (c.b << 16) | (c.g << 8) | c.r;
-  for (let i = 0; i < m.length; i++) if (m[i]) d[i] = v;
+
+let picked = null;
+function wandPick(img, x, y, o) {
+  const sx = Math.floor(x);
+  const sy = Math.floor(y);
+  const key = [o.tolerance, o.contiguous, o.antialias, o.sample].join();
+  const seed = wandSeed(img, sx, sy, o.sample);
+  const p = picked;
+  if (p && p.img === img && p.key === key && p.s.b && seed.every((v, i) => v === p.s.seed[i]) && (!o.contiguous || (o.sample === 1 && p.s.cov[sy * img.width + sx] === 255))) {
+    p.s.reused = true;
+    return p.s;
+  }
+  const s = wandSelect(img, x, y, o);
+  s.reused = false;
+  s.canvas = null;
+  s.sel = null;
+  picked = { img, key, s };
+  return s;
+}
+function plain(l) {
+  return l.type === 'raster' && l.visible && l.opacity === 1 && l.blend === 'normal' && !l.clip && !l.fx && !l.tm && !(l.mask && l.mask.on);
+}
+function sampled(doc, merged) {
+  if (!isFlat(doc, merged)) return doc.al;
+  const seen = doc.layers.filter((l) => l.visible);
+  return seen.length === 1 && plain(seen[0]) ? seen[0] : null;
+}
+function wandDecon(doc, est, img, merged) {
+  const l = est && sampled(doc, merged);
+  return l ? { idx: est.idx, cov: est.cov, out: est.out, inn: est.inn, sum: wandSum(img, est.idx), layer: l.id, ver: l.ver, all: isFlat(doc, merged) } : null;
+}
+export function deconFor(doc, l) {
+  const k = doc.sel && doc.sel.decon;
+  if (!k || !l || l !== doc.al || k.layer !== l.id || l.type !== 'raster' || doc.target === 'mask') return null;
+  if (k.all && sampled(doc, true) !== l) return null;
+  if (wandSum(docPixels(doc, false), k.idx) !== k.sum) return null;
+  k.ver = l.ver;
+  return k;
+}
+export function deconStamp(c, ox, oy, w, k, px) {
+  const g = cx(c);
+  const idx = k.idx;
+  const n = idx.length;
+  let s = 0;
+  while (s < n) {
+    const y0 = Math.floor(idx[s] / w);
+    const lim = (y0 + 128) * w;
+    let e = s;
+    let x0 = w;
+    let x1 = -1;
+    for (; e < n && idx[e] < lim; e++) {
+      const x = idx[e] % w;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+    }
+    const y1 = Math.floor(idx[e - 1] / w);
+    const r = meet({ x: x0 - ox, y: y0 - oy, w: x1 - x0 + 1, h: y1 - y0 + 1 }, { x: 0, y: 0, w: c.width, h: c.height });
+    if (r) {
+      const img = g.getImageData(r.x, r.y, r.w, r.h);
+      const d = img.data;
+      for (let j = s; j < e; j++) {
+        const x = (idx[j] % w) - ox - r.x;
+        const y = Math.floor(idx[j] / w) - oy - r.y;
+        if (x < 0 || y < 0 || x >= r.w || y >= r.h) continue;
+        const q = (y * r.w + x) * 4;
+        d[q] = px[j * 4];
+        d[q + 1] = px[j * 4 + 1];
+        d[q + 2] = px[j * 4 + 2];
+        d[q + 3] = px[j * 4 + 3];
+      }
+      g.putImageData(img, r.x, r.y);
+    }
+    s = e;
+  }
+}
+function covAt(c, idx, w, b) {
+  const a = cx(c).getImageData(b.x, b.y, b.w, b.h).data;
+  const out = new Uint8Array(idx.length);
+  for (let j = 0; j < idx.length; j++) {
+    const x = (idx[j] % w) - b.x;
+    const y = Math.floor(idx[j] / w) - b.y;
+    out[j] = a[(y * b.w + x) * 4 + 3];
+  }
+  return out;
+}
+export function maskCanvas(m, w, hh, color, b) {
   const out = mk(w, hh);
-  cx(out).putImageData(img, 0, 0);
+  const r = b === undefined ? { x: 0, y: 0, w, h: hh } : b;
+  if (!r) return out;
+  const img = new ImageData(r.w, r.h);
+  const d = new Int32Array(img.data.buffer);
+  const c = color || { r: 255, g: 255, b: 255 };
+  const v = (c.b << 16) | (c.g << 8) | c.r;
+  for (let y = 0, k = 0; y < r.h; y++) {
+    for (let x = 0, i = (r.y + y) * w + r.x; x < r.w; x++, i++, k++) d[k] = (m[i] << 24) | v;
+  }
+  cx(out).putImageData(img, r.x, r.y);
   return out;
 }
 
+function stampCov(c, out, k) {
+  const img = new ImageData(k.w, k.h);
+  const d = new Int32Array(img.data.buffer);
+  for (let i = 0; i < out.length; i++) d[i] = (out[i] << 24) | 0xffffff;
+  cx(c).putImageData(img, k.x, k.y);
+  return c;
+}
+function meet(a, b) {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const w = Math.min(a.x + a.w, b.x + b.w) - x;
+  const hh = Math.min(a.y + a.h, b.y + b.h) - y;
+  return w > 0 && hh > 0 ? { x, y, w, h: hh } : null;
+}
+function trimmed(c, r, k) {
+  if (k.x > r.x && k.y > r.y && k.x + k.w < r.x + r.w && k.y + k.h < r.y + r.h) return r;
+  const t = bounds(crop(c, r.x, r.y, r.w, r.h));
+  return t && { x: t.x + r.x, y: t.y + r.y, w: t.w, h: t.h };
+}
+function wandCombine(doc, s, mode, img, merged) {
+  const old = doc.sel;
+  if (!old || mode === 'new') {
+    if (!s.canvas) s.canvas = maskCanvas(s.cov, doc.w, doc.h, null, s.b);
+    setSel(doc, s.canvas, s.b, wandDecon(doc, s.est, img, merged));
+    if (doc.sel && s.sel && s.sel.c === doc.sel.c) doc.sel.path = s.sel.path;
+    s.sel = doc.sel;
+    return;
+  }
+  const k = s.b && (mode === 'add' ? s.b : meet(old.b, s.b));
+  if (!k) {
+    setSel(doc, mode === 'int' ? null : old.c, mode === 'int' ? null : old.b, mode === 'int' ? null : old.decon);
+    return;
+  }
+  const m = wandMix(alphaOf(cx(old.c).getImageData(k.x, k.y, k.w, k.h)), s.cov, doc.w, k, mode);
+  const c = stampCov(mode === 'int' ? mk(doc.w, doc.h) : clone(old.c), m.out, k);
+  let dec = null;
+  if (mode === 'add') {
+    const l = sampled(doc, merged);
+    const od = old.decon;
+    const keep = od && l && od.layer === l.id && od.all === isFlat(doc, merged) && wandSum(img, od.idx) === od.sum ? od : null;
+    dec = l ? wandDecon(doc, deconJoin(keep, s.est, m.out, doc.w, k), img, merged) : null;
+  }
+  setSel(doc, c, mode === 'add' ? union(old.b, k) : mode === 'int' ? m.b : trimmed(c, old.b, k), dec);
+}
+function alphaOf(img) {
+  const d = img.data;
+  const out = new Uint8Array(img.width * img.height);
+  for (let i = 0, p = 3; i < out.length; i++, p += 4) out[i] = d[p];
+  return out;
+}
 function healRegion(s) {
   const pad = Math.ceil(s.size * 1.5) + 8;
   const x = clamp(Math.floor(s.rect.x - pad), 0, s.c.width);
