@@ -8,6 +8,7 @@ import { initIO, autosave, pendingAutosaves, restoreAutosaves, clearAutosaves, d
 import { dialog } from './ui.js';
 import { h } from './util.js';
 import { PRESETS, newDoc } from './docs.js';
+import { ai, aiFill, planFill, resetAi } from './ai.js';
 
 function combo(ev) {
   let key = ev.key;
@@ -153,6 +154,7 @@ function boot() {
   app.isTest = /[?&]test=1/.test(location.search);
   app.api = {
     run, newDoc, setTool, flatten, render, Layer, emit, invalidate, setCursor, view, autosave,
+    ai: { state: ai, fill: aiFill, plan: planFill, reset: resetAi },
     pixel: (x, y) => { const c = sample(app.doc, x, y, true); return [c.r, c.g, c.b, c.a]; },
     toClient: (x, y) => { const r = view.stage.getBoundingClientRect(); const p = toScreen(x, y); return { x: r.left + p.x, y: r.top + p.y }; }
   };

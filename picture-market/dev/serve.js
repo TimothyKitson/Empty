@@ -21,6 +21,7 @@ const TYPES = {
 
 function serve(root, port = 0) {
   const base = path.resolve(root);
+  const isolate = process.env.PM_ISOLATE === '1';
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       let rel = '/';
@@ -42,10 +43,15 @@ function serve(root, port = 0) {
           res.end('not found');
           return;
         }
-        res.writeHead(200, {
+        const head = {
           'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream',
           'Cache-Control': 'no-store'
-        });
+        };
+        if (isolate) {
+          head['Cross-Origin-Opener-Policy'] = 'same-origin';
+          head['Cross-Origin-Embedder-Policy'] = 'credentialless';
+        }
+        res.writeHead(200, head);
         res.end(data);
       });
     });

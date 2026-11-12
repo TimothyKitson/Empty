@@ -3,3 +3,5 @@
 __pycache__/
 node_modules/
 picture-market/dev/shots/
+picture-market/site/ai/
+picture-market/dist/*.zip

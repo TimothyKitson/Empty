@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const esbuild = require('esbuild');
+const { fetchAi } = require('./fetch-ai');
 
 const ROOT = path.resolve(__dirname, '..');
 const SITE = path.join(ROOT, 'site');
@@ -22,13 +23,14 @@ function zip(entries) {
   let offset = 0;
   for (const e of entries) {
     const name = Buffer.from(e.name, 'utf8');
-    const data = zlib.deflateRawSync(e.data, { level: 9 });
+    const method = e.store ? 0 : 8;
+    const data = e.store ? e.data : zlib.deflateRawSync(e.data, { level: 9 });
     const crc = crc32(e.data);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0x0800, 6);
-    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(method, 8);
     local.writeUInt16LE(0, 10);
     local.writeUInt16LE(0x21, 12);
     local.writeUInt32LE(crc, 14);
@@ -42,7 +44,7 @@ function zip(entries) {
     cd.writeUInt16LE(20, 4);
     cd.writeUInt16LE(20, 6);
     cd.writeUInt16LE(0x0800, 8);
-    cd.writeUInt16LE(8, 10);
+    cd.writeUInt16LE(method, 10);
     cd.writeUInt16LE(0, 12);
     cd.writeUInt16LE(0x21, 14);
     cd.writeUInt32LE(crc, 16);
@@ -62,6 +64,15 @@ function zip(entries) {
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...parts, ...central, end]);
 }
+
+const HEADERS = [
+  '/*',
+  '  Cross-Origin-Opener-Policy: same-origin',
+  '  Cross-Origin-Embedder-Policy: credentialless',
+  '/ai/*',
+  '  Cache-Control: public, max-age=31536000, immutable',
+  ''
+].join('\n');
 
 async function build() {
   const html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
@@ -95,13 +106,20 @@ async function build() {
   fs.mkdirSync(DIST, { recursive: true });
   fs.writeFileSync(path.join(DIST, 'picture-market.html'), out);
   const licenses = fs.readFileSync(path.join(SITE, 'vendor', 'LICENSES.txt'));
-  fs.writeFileSync(path.join(DIST, 'picture-market-netlify.zip'), zip([
+  const ai = await fetchAi((m) => console.log(m));
+  const entries = [
     { name: 'index.html', data: Buffer.from(out, 'utf8') },
-    { name: 'LICENSES.txt', data: licenses }
-  ]));
-  const size = (f) => (fs.statSync(path.join(DIST, f)).size / 1024).toFixed(0) + ' KB';
-  console.log('dist/picture-market.html ' + size('picture-market.html'));
-  console.log('dist/picture-market-netlify.zip ' + size('picture-market-netlify.zip'));
+    { name: 'LICENSES.txt', data: licenses },
+    { name: '_headers', data: Buffer.from(HEADERS, 'utf8') },
+    ...ai.map((e) => ({ name: 'ai/' + e.name, data: fs.readFileSync(e.file), store: e.name.endsWith('.onnx') }))
+  ];
+  fs.writeFileSync(path.join(DIST, 'picture-market-netlify.zip'), zip(entries));
+  const kb = (n) => (n / 1024).toFixed(0) + ' KB';
+  const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
+  const size = (f) => fs.statSync(path.join(DIST, f)).size;
+  console.log('dist/picture-market.html ' + kb(size('picture-market.html')));
+  for (const e of entries) console.log('  zip: ' + e.name + ' ' + (e.data.length > 1048576 ? mb(e.data.length) : kb(e.data.length)) + (e.store ? ' (stored)' : ''));
+  console.log('dist/picture-market-netlify.zip ' + mb(size('picture-market-netlify.zip')));
 }
 
 build().catch((e) => {

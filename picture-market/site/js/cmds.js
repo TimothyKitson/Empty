@@ -6,6 +6,7 @@ import { paintTarget, startTransform, endModal, editText, cropDoc, setTool, TOOL
 import { dialog, form, toast, pickColor } from './ui.js';
 import { PRESETS, activate, addDoc, removeDoc, newDoc, busy } from './docs.js';
 import { openFiles, saveProject, exportImage, exportPsd, printDoc, placeCanvas } from './io.js';
+import { aiFill } from './ai.js';
 
 const doc = () => app.doc;
 const copyObj = (o) => (o ? JSON.parse(JSON.stringify(o)) : null);
@@ -587,8 +588,12 @@ function fillWith(color, opacity = 1, name = 'Fill') {
 }
 async function fillDialog() {
   const v = { use: 'fg', opacity: 100 };
-  const ok = await dialog('Fill', form([S('use', 'Contents', [['fg', 'Foreground Color'], ['bg', 'Background Color'], ['color', 'Color…'], ['black', 'Black'], ['gray', '50% Gray'], ['white', 'White']], 'fg'), R('opacity', 'Opacity', 1, 100, 100)], v, () => {}), undefined, { width: 320 });
+  const ok = await dialog('Fill', form([S('use', 'Contents', [['fg', 'Foreground Color'], ['bg', 'Background Color'], ['color', 'Color…'], ['ai', 'Content-Aware (AI)'], ['black', 'Black'], ['gray', '50% Gray'], ['white', 'White']], 'fg'), R('opacity', 'Opacity', 1, 100, 100)], v, () => {}), undefined, { width: 320 });
   if (!ok) return;
+  if (v.use === 'ai') {
+    await aiFill(doc());
+    return;
+  }
   let c = app.fg;
   if (v.use === 'bg') c = app.bg;
   else if (v.use === 'black') c = { r: 0, g: 0, b: 0 };
@@ -763,6 +768,7 @@ const CMD = {
   paste: pasteClip,
   clear: () => doc() && clearSel(),
   fill: () => doc() && fillDialog(),
+  aiFill: () => doc() && aiFill(doc()),
   fillFg: () => doc() && fillWith(app.fg),
   fillBg: () => doc() && fillWith(app.bg),
   stroke: () => doc() && strokeDialog(),
@@ -1194,7 +1200,7 @@ export const MENUS = [
   { id: 'edit', label: 'Edit', items: () => [
     I('Undo', 'undo', 'Ctrl+Z', () => !!(doc() && (doc().hi >= 0 || app.modal))), I('Redo', 'redo', 'Shift+Ctrl+Z', () => !!(doc() && doc().hi < doc().hist.length - 1)), '-',
     I('Cut', 'cut', 'Ctrl+X', hasSel), I('Copy', 'copy', 'Ctrl+C'), I('Copy Merged', 'copyMerged', 'Shift+Ctrl+C'), { label: 'Paste', cmd: 'paste', key: 'Ctrl+V', on: () => !!app.clip }, I('Clear', 'clear', 'Delete'), '-',
-    I('Fill…', 'fill', 'Shift+F5'), I('Stroke…', 'stroke', '', hasSel), '-',
+    I('Fill…', 'fill', 'Shift+F5'), I('AI Fill', 'aiFill'), I('Stroke…', 'stroke', '', hasSel), '-',
     I('Free Transform', 'transform', 'Ctrl+T'),
     { label: 'Transform', sub: [I('Flip Horizontal', 'flipH'), I('Flip Vertical', 'flipV'), '-', I('Rotate 180°', 'rot180'), I('Rotate 90° Clockwise', 'rotCw'), I('Rotate 90° Counter Clockwise', 'rotCcw')] }
   ] },
