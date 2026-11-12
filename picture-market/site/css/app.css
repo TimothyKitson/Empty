@@ -225,6 +225,7 @@ body.nopanels .dock, body.nopanels .toolbar, body.nopanels .optbar { display: no
 
 .aidialog { width: 360px; }
 .aidialog .dhead { cursor: default; }
+.aiwhat { margin-bottom: 6px; font-weight: 600; }
 .aistat { display: flex; gap: 10px; align-items: baseline; line-height: 1.5; }
 .aitext { flex: 1; }
 .aipct { color: var(--dim); font-variant-numeric: tabular-nums; }

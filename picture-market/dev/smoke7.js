@@ -4,7 +4,8 @@ const { chromium } = require('playwright');
 const { serve } = require('./serve');
 const { fetchAi } = require('./fetch-ai');
 
-const NOTHING = 'Select the area you want filled in first, or erase the part you want replaced.';
+const NOTHING = 'Nothing is empty on this page. Select the area you want filled in first.';
+const NO_PICTURE = 'There is no solid picture on this page for the AI to continue from.';
 const NO_DOWNLOAD = 'The AI model could not be downloaded. Check the internet connection and try again.';
 const ZIP_NAMES = ['LICENSES.txt', '_headers', 'ai/migan_pipeline_v2.onnx', 'ai/ort-wasm-simd-threaded.wasm', 'ai/ort.wasm.bundle.min.mjs', 'index.html'];
 
@@ -26,7 +27,15 @@ function zipEntries(buf) {
 
 function inPage() {
   const api = window.app.api;
-  const log = { opened: 0, closed: 0, texts: [], toasts: [] };
+  const log = { opened: 0, closed: 0, texts: [], toasts: [], what: [], gap: 0 };
+  let beat = performance.now();
+  const pulse = () => {
+    const now = performance.now();
+    if (now - beat > log.gap) log.gap = now - beat;
+    beat = now;
+    setTimeout(pulse, 8);
+  };
+  pulse();
   const has = (n, c) => !!(n.classList && n.classList.contains(c));
   new MutationObserver((list) => {
     for (const m of list) {
@@ -38,6 +47,8 @@ function inPage() {
     }
     const t = document.querySelector('.aitext');
     if (!t) return;
+    const what = document.querySelector('.aiwhat').textContent;
+    if (log.what[log.what.length - 1] !== what) log.what.push(what);
     const s = t.textContent + '|' + document.querySelector('.aipct').textContent;
     if (log.texts[log.texts.length - 1] !== s) log.texts.push(s);
   }).observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -83,6 +94,126 @@ function inPage() {
         g.fillRect(0, 0, w, h);
         g.globalCompositeOperation = 'source-over';
       });
+    },
+    rough(w, h, name, amount = 24) {
+      const d = window.T.grad(w, h, name);
+      return paint(d, (g) => noise(g, w, h, amount, 777));
+    },
+    flat(name) {
+      const d = api.newDoc({ w: 900, h: 700, dpi: 72, bg: 'white', name });
+      return paint(d, (g) => {
+        g.fillStyle = 'rgb(20,120,130)';
+        g.fillRect(0, 0, 900, 700);
+        g.fillStyle = 'rgb(250,200,40)';
+        g.beginPath();
+        g.moveTo(0, 120);
+        g.lineTo(900, 40);
+        g.lineTo(900, 110);
+        g.lineTo(0, 190);
+        g.fill();
+        g.fillStyle = 'rgb(230,60,60)';
+        g.beginPath();
+        g.arc(450, 450, 50, 0, 7);
+        g.fill();
+      });
+    },
+    halves(name) {
+      const d = api.newDoc({ w: 900, h: 700, dpi: 72, bg: 'white', name });
+      return paint(d, (g) => {
+        g.fillStyle = 'rgb(244,208,63)';
+        g.fillRect(0, 0, 450, 700);
+        g.fillStyle = 'rgb(31,58,147)';
+        g.fillRect(450, 0, 450, 700);
+      });
+    },
+    add(name, draw, opt) {
+      const d = window.app.doc;
+      const c = document.createElement('canvas');
+      c.width = d.w;
+      c.height = d.h;
+      if (draw) draw(c.getContext('2d'));
+      const l = new api.Layer(Object.assign({ name, canvas: c }, opt || {}));
+      d.layers.push(l);
+      d.touch('all');
+      api.emit('layers');
+      return l;
+    },
+    activate(name) {
+      const d = window.app.doc;
+      d.active = d.layers.find((l) => l.name === name).id;
+      api.emit('layers');
+    },
+    sel(x, y, w, h, draw) {
+      const d = window.app.doc;
+      const c = document.createElement('canvas');
+      c.width = d.w;
+      c.height = d.h;
+      const g = c.getContext('2d');
+      g.fillStyle = '#000';
+      if (draw) draw(g);
+      else g.fillRect(x, y, w, h);
+      d.sel = { c, b: { x, y, w, h }, path: null };
+      api.emit('sel', d);
+      return { x, y, w, h };
+    },
+    top() {
+      const d = window.app.doc;
+      const l = d.layers[d.layers.length - 1];
+      return { name: l.name, opacity: l.opacity, clip: l.clip, blend: l.blend, x: l.x, y: l.y, w: l.w, h: l.h, active: d.active === l.id };
+    },
+    stats(key, box) {
+      const d = window.app.doc;
+      const a = kept[key];
+      const b = pixels(d);
+      const w = d.w;
+      const lum = (px, p) => 0.299 * px[p] + 0.587 * px[p + 1] + 0.114 * px[p + 2];
+      const was = [0, 0, 0];
+      const now = [0, 0, 0];
+      let n = 0;
+      let worst = 0;
+      let din = 0;
+      let nin = 0;
+      let dout = 0;
+      let nout = 0;
+      for (let y = Math.max(0, box.y - 30); y < Math.min(d.h, box.y + box.h + 30); y++) {
+        for (let x = Math.max(0, box.x - 30); x < Math.min(w - 1, box.x + box.w + 30); x++) {
+          const p = (y * w + x) * 4;
+          const inside = x >= box.x && x < box.x + box.w - 1 && y >= box.y && y < box.y + box.h;
+          const step = Math.abs(lum(b, p) - lum(b, p + 4));
+          if (inside) {
+            din += step;
+            nin++;
+            n++;
+            for (let k = 0; k < 3; k++) {
+              was[k] += a[p + k];
+              now[k] += b[p + k];
+              worst = Math.max(worst, Math.abs(a[p + k] - b[p + k]));
+            }
+          } else if (x < box.x - 1 || x >= box.x + box.w || y < box.y || y >= box.y + box.h) {
+            dout += step;
+            nout++;
+          }
+        }
+      }
+      const off = Math.max(...was.map((v, k) => Math.abs(v - now[k]) / Math.max(1, n)));
+      return { off: Math.round(off * 10) / 10, worst, detailIn: Math.round((din / Math.max(1, nin)) * 10) / 10, detailOut: Math.round((dout / Math.max(1, nout)) * 10) / 10 };
+    },
+    colours(box) {
+      const d = window.app.doc;
+      const b = pixels(d);
+      const seen = {};
+      let edgeOff = 0;
+      for (let y = box.y; y < box.y + box.h; y++) {
+        let first = -1;
+        for (let x = box.x; x < box.x + box.w; x++) {
+          const p = (y * d.w + x) * 4;
+          const k = b[p] + ',' + b[p + 1] + ',' + b[p + 2];
+          seen[k] = (seen[k] || 0) + 1;
+          if (first < 0 && b[p + 2] > 100) first = x;
+        }
+        edgeOff = Math.max(edgeOff, Math.abs(first - 450));
+      }
+      return { seen, edgeOff };
     },
     photo(name) {
       const w = 900;
@@ -200,7 +331,8 @@ function inPage() {
       const d = window.app.doc;
       return {
         layers: d.layers.map((l) => l.name), active: d.al ? d.al.name : null, activeIndex: d.layers.indexOf(d.al), hist: d.hist.length, hi: d.hi,
-        last: d.hi >= 0 ? d.hist[d.hi].name : null, sel: d.sel ? { ...d.sel.b } : null, stats: JSON.parse(JSON.stringify(api.ai.state.stats))
+        last: d.hi >= 0 ? d.hist[d.hi].name : null, names: d.hist.slice(0, d.hi + 1).map((e) => e.name), modal: !!window.app.modal,
+        sel: d.sel ? { ...d.sel.b } : null, stats: JSON.parse(JSON.stringify(api.ai.state.stats))
       };
     },
     compare(key, box, pad = 0) {
@@ -252,8 +384,10 @@ function inPage() {
     },
     async fill() {
       const t0 = performance.now();
+      log.gap = 0;
+      beat = t0;
       const out = await api.ai.fill(window.app.doc);
-      return { out, ms: Math.round(performance.now() - t0) };
+      return { out, ms: Math.round(performance.now() - t0), gap: Math.round(log.gap) };
     }
   };
 }
@@ -274,7 +408,7 @@ function inPage() {
   const errors = [];
   const fails = [];
   const times = {};
-  const expected = /migan_pipeline_v2\.onnx|ai\/ort\.wasm\.bundle\.min\.mjs/;
+  const expected = /migan_pipeline_v2\.onnx|ort\.wasm\.bundle\.min\.mjs/;
   const check = (name, ok, info) => { if (!ok) fails.push(name + ' ' + JSON.stringify(info)); else console.log('ok  ' + name); };
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -335,7 +469,7 @@ function inPage() {
   };
 
   const A = await open(srv.url);
-  await A.ev(() => window.T.grad(600, 450, 'Gradient'));
+  await A.ev(() => window.T.rough(600, 450, 'Grain'));
   await A.settle(300);
   const box = await A.select([220, 160], [380, 290]);
   check('the marquee selected the hole', box && Math.abs(box.w - 160) <= 4 && Math.abs(box.h - 130) <= 4, box);
@@ -354,16 +488,20 @@ function inPage() {
   times.first = await A.menuFill();
   const s1 = await A.state();
   const texts = await A.ev(() => window.T.log.texts.slice());
+  const what1 = await A.ev(() => window.T.log.what.slice());
   check('the next attempt after a failure works', s1.stats.sessions === 1 && s1.stats.runs === 1, s1.stats);
+  check('the dialog says what is being filled', what1.join() === 'Filling the selected area', what1);
   check('the dialog reports the download with a percentage', texts.some((t) => /^Getting the AI ready — 43 MB, first time only\|\d+%$/.test(t)), texts);
   check('the dialog then says Filling…', texts.includes('Filling…|'), texts);
   check('files come from ' + (local ? 'next to the page' : 'the public URLs'), s1.stats.home === (local ? 'local' : 'public'), s1.stats);
   check('inference runs in a worker', s1.stats.worker === true, s1.stats);
-  check('a new layer AI Fill sits directly above the active layer', s1.layers.join() === 'Background,AI Fill' && s1.activeIndex === s0.activeIndex + 1 && s1.active === 'AI Fill', s1);
+  check('a new layer AI Fill sits on top and is active', s1.layers.join() === 'Background,AI Fill' && s1.active === 'AI Fill', s1);
   check('history ends with AI Fill, one step', s1.last === 'AI Fill' && s1.hist === s0.hist + 1, s1);
   check('the selection stays', JSON.stringify(s1.sel) === JSON.stringify(s0.sel), [s0.sel, s1.sel]);
   const c1 = await A.ev((b) => window.T.compare('grad', b), box);
-  check('the hole centre is within 25 levels of the gradient', c1.off <= 25, c1);
+  const m1 = await A.ev((b) => window.T.stats('grad', b), box);
+  check('the filled hole keeps the colour of its surroundings', m1.off <= 25, m1);
+  check('the fill has the grain of its surroundings', m1.detailIn >= 0.6 * m1.detailOut && m1.detailIn <= 1.6 * m1.detailOut, m1);
   check('every pixel outside the selection is bit-identical', c1.outside === 0 && c1.inside > 0, c1);
   await A.shot('ai-gradient');
   await A.page.keyboard.press('Control+z');
@@ -391,10 +529,94 @@ function inPage() {
   const options = await A.page.locator('.dialog select option').allTextContents();
   check('Fill… offers Content-Aware (AI)', options.includes('Content-Aware (AI)'), options);
   await A.page.locator('.dialog select').selectOption('ai');
+  await A.page.locator('.dialog input.slider').first().evaluate((el) => {
+    el.value = 30;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   await A.page.locator('.dialog .btn.primary').click();
   await A.waitClosed(nd);
   const sD = await A.state();
+  const tD = await A.ev(() => window.T.top());
   check('Fill… ▸ Content-Aware (AI) runs AI Fill', sD.layers.join() === 'Background,AI Fill' && sD.last === 'AI Fill', sD);
+  check('Fill… ▸ Content-Aware (AI) uses the Opacity field', Math.abs(tD.opacity - 0.3) < 0.01, tD);
+
+  await A.page.keyboard.press('Control+z');
+  await A.settle(300);
+  await A.ev(() => {
+    window.T.add('Invert', null, { type: 'adjust', adj: { kind: 'invert', p: {} } });
+    window.T.activate('Background');
+    window.T.keep('adjust');
+  });
+  await A.settle(300);
+  const rJ = await A.fill();
+  const sJ = await A.state();
+  const mJ = await A.ev((b) => window.T.stats('adjust', b), box);
+  const cJ = await A.ev((b) => window.T.compare('adjust', b), box);
+  check('with an adjustment layer above, the fill goes on top and is not adjusted twice', rJ.out === 'done' && sJ.layers.join() === 'Background,Invert,AI Fill' && mJ.off <= 25 && cJ.outside === 0, [rJ, sJ.layers, mJ, cJ]);
+
+  await A.ev(() => {
+    window.T.grad(600, 450, 'Clip');
+    window.T.add('Shape', (g) => { g.fillStyle = '#fff'; g.fillRect(100, 100, 300, 300); });
+    window.T.add('Clipped', (g) => { g.fillStyle = '#00f'; g.fillRect(0, 0, 600, 450); }, { clip: true });
+    window.T.activate('Shape');
+    window.T.sel(440, 290, 80, 80);
+    window.T.keep('clip');
+  });
+  await A.settle(300);
+  const rQ = await A.fill();
+  const sQ = await A.state();
+  const cQ = await A.ev(() => window.T.compare('clip', { x: 440, y: 290, w: 80, h: 80 }));
+  const tQ = await A.ev(() => window.T.top());
+  check('a clipping group below stays intact', rQ.out === 'done' && sQ.layers.join() === 'Background,Shape,Clipped,AI Fill' && tQ.clip === false && cQ.outside === 0, [rQ, sQ.layers, tQ, cQ]);
+
+  await A.ev(() => {
+    window.T.grad(600, 450, 'Covered');
+    window.T.add('Photo', (g) => {
+      g.fillStyle = '#888';
+      g.fillRect(0, 0, 600, 450);
+      g.fillStyle = '#c00';
+      g.beginPath();
+      g.arc(300, 220, 40, 0, 7);
+      g.fill();
+    });
+    window.T.activate('Background');
+    window.T.sel(240, 160, 120, 120);
+    window.T.keep('covered');
+  });
+  await A.settle(300);
+  const rV = await A.fill();
+  const cV = await A.ev(() => window.T.compare('covered', { x: 240, y: 160, w: 120, h: 120 }));
+  check('with a lower layer active the fill is still visible', rV.out === 'done' && cV.now.join() === '136,136,136,255' && cV.outside === 0, [rV, cV]);
+
+  const runs0 = (await A.state()).stats.runs;
+  await A.ev(() => {
+    window.T.flat('Flat');
+    window.T.sel(350, 350, 200, 200);
+    window.T.keep('flat');
+  });
+  await A.settle(300);
+  const rG = await A.fill();
+  const flatSeen = await A.ev(() => window.T.colours({ x: 350, y: 350, w: 200, h: 200 }).seen);
+  check('flat artwork comes back exactly flat', rG.out === 'done' && Object.keys(flatSeen).join() === '20,120,130', [rG, flatSeen]);
+  await A.shot('ai-flat');
+  await A.ev(() => {
+    window.T.halves('Halves');
+    window.T.sel(300, 200, 300, 300);
+  });
+  await A.settle(300);
+  const rH = await A.fill();
+  const halves = await A.ev(() => window.T.colours({ x: 300, y: 200, w: 300, h: 300 }));
+  check('a hard edge in flat artwork continues sharp and straight', rH.out === 'done' && Object.keys(halves.seen).sort().join('|') === '244,208,63|31,58,147' && halves.edgeOff <= 2, [rH, halves]);
+  await A.ev(() => {
+    window.T.grad(600, 450, 'Smooth');
+    window.T.sel(200, 150, 200, 150);
+    window.T.keep('smooth');
+  });
+  await A.settle(300);
+  const rW = await A.fill();
+  const mW = await A.ev(() => window.T.stats('smooth', { x: 200, y: 150, w: 200, h: 150 }));
+  check('a smooth gradient is continued without invented detail', rW.out === 'done' && mW.worst <= 12, [rW, mW]);
+  check('flat and smooth fills do not need the model', (await A.state()).stats.runs === runs0, [runs0, (await A.state()).stats.runs]);
 
   await A.ev(() => window.T.grad(600, 450, 'Feather'));
   await A.settle(300);
@@ -422,6 +644,7 @@ function inPage() {
     l.ver++;
     d.touch('all');
     window.T.keep('blanks');
+    window.T.log.what.length = 0;
   });
   await A.settle(300);
   const sB0 = await A.state();
@@ -429,7 +652,9 @@ function inPage() {
   const sB = await A.state();
   const cB = await A.ev(() => window.T.compare('blanks', null));
   const corner = await A.ev(() => window.T.compare('truth', { x: 400, y: 10, w: 80, h: 80 }));
-  check('no selection fills the blanks with a bottom layer', rB.out === 'done' && sB.layers.join() === 'AI Fill,Background' && sB.active === 'Background', [rB, sB.layers, sB.active]);
+  const whatB = await A.ev(() => window.T.log.what.slice());
+  check('no selection fills the blanks with a layer on top', rB.out === 'done' && sB.layers.join() === 'Background,AI Fill' && sB.active === 'AI Fill', [rB, sB.layers, sB.active]);
+  check('the dialog says the empty areas are being filled', whatB.join() === 'Filling the empty areas of the page', whatB);
   check('the document is fully opaque afterwards', cB.alphaMin === 255, cB);
   check('every previously opaque pixel is unchanged', cB.opaqueChanged === 0, cB);
   check('the filled corner continues the picture', corner.off <= 45, corner);
@@ -437,10 +662,10 @@ function inPage() {
   await A.shot('ai-blanks');
   await A.page.keyboard.press('Control+z');
   await A.settle(300);
-  check('undo removes the bottom layer', (await A.state()).layers.join() === 'Background', null);
+  check('undo removes the layer again', (await A.state()).layers.join() === 'Background', null);
 
   await A.ev(() => {
-    const d = window.T.grad(900, 700, 'Corners');
+    const d = window.T.rough(900, 700, 'Corners');
     const l = d.layers[0];
     const g = l.canvas.getContext('2d');
     g.clearRect(0, 0, 120, 100);
@@ -457,8 +682,43 @@ function inPage() {
   const cK = await A.ev(() => window.T.compare('corners', null));
   const textsK = await A.ev(() => window.T.log.texts.slice());
   check('two separate blanks are filled one after the other', rK.out === 'done' && sK.stats.runs === sK0.stats.runs + 2 && textsK.includes('Filling… 2 of 2|'), [rK, sK.stats, textsK]);
-  check('both blanks end up opaque in one layer and one history step', cK.alphaMin === 255 && cK.opaqueChanged === 0 && sK.layers.join() === 'AI Fill,Background' && sK.hist === sK0.hist + 1, [cK, sK]);
+  check('both blanks end up opaque in one layer and one history step', cK.alphaMin === 255 && cK.opaqueChanged === 0 && sK.layers.join() === 'Background,AI Fill' && sK.hist === sK0.hist + 1, [cK, sK]);
   await A.shot('ai-corners');
+
+  await A.ev(() => {
+    window.T.rough(900, 700, 'Edge');
+    window.T.sel(0, 250, 200, 200);
+    window.T.keep('edge');
+  });
+  await A.settle(300);
+  const rX = await A.fill();
+  const sX = await A.state();
+  const mX = await A.ev(() => window.T.stats('edge', { x: 0, y: 250, w: 200, h: 200 }));
+  check('a hole at the page edge is still given to the model', rX.out === 'done' && sX.stats.plan.comps[0].model >= 0.75 && mX.off <= 25, [rX, sX.stats.plan.comps, mX]);
+
+  await A.ev(() => {
+    const d = window.app.api.newDoc({ w: 900, h: 600, dpi: 72, bg: 'transparent', name: 'Beside' });
+    const l = d.layers[0];
+    l.canvas = document.createElement('canvas');
+    l.canvas.width = 900;
+    l.canvas.height = 600;
+    const g = l.canvas.getContext('2d');
+    const a = g.createLinearGradient(0, 0, 0, 600);
+    a.addColorStop(0, 'rgb(60,197,90)');
+    a.addColorStop(1, 'rgb(130,190,110)');
+    g.fillStyle = a;
+    g.fillRect(0, 0, 300, 600);
+    l.ver++;
+    d.touch('all');
+    window.T.sel(310, 250, 100, 100);
+    window.T.keep('beside');
+  });
+  await A.settle(300);
+  const runsY = (await A.state()).stats.runs;
+  const rYy = await A.fill();
+  const beside = await A.ev(() => [window.app.api.pixel(360, 300), window.app.api.pixel(290, 300)]);
+  const farY = Math.max(...[0, 1, 2].map((k) => Math.abs(beside[0][k] - beside[1][k])));
+  check('an empty area beside a smooth picture gets its colour, not a texture', rYy.out === 'done' && beside[0][3] === 255 && farY <= 20 && (await A.state()).stats.runs === runsY, [rYy, beside]);
 
   await A.ev(() => window.T.grad(300, 200, 'Opaque'));
   await A.settle(200);
@@ -471,31 +731,122 @@ function inPage() {
   check('nothing to fill makes no history step', sN.hist === sN0.hist && sN.layers.length === 1 && sN.stats.runs === sN0.stats.runs, sN);
   await A.ev(() => window.app.api.newDoc({ w: 300, h: 200, dpi: 72, bg: 'transparent', name: 'Empty' }));
   await A.settle(200);
+  const tE = await A.ev(() => window.T.log.toasts.length);
   const rE = await A.fill();
-  check('an empty page is refused, not invented', rE.out === 'blind' && (await A.state()).hist === 0, rE);
+  const toastsE0 = await A.ev((n) => window.T.log.toasts.slice(n), tE);
+  check('an empty page is refused with its own message', rE.out === 'empty' && toastsE0.join('|') === NO_PICTURE && (await A.state()).hist === 0, [rE, toastsE0]);
+  await A.ev(() => {
+    const d = window.T.grad(400, 300, 'Sheer');
+    const l = d.layers[0];
+    const g = l.canvas.getContext('2d');
+    g.clearRect(160, 110, 80, 80);
+    l.opacity = 0.95;
+    l.ver++;
+    d.touch('all');
+    window.T.keep('sheer');
+  });
+  await A.settle(200);
+  const rS = await A.fill();
+  const hole = await A.ev(() => window.app.api.pixel(200, 150));
+  check('a slightly see-through picture still counts as picture', rS.out === 'done' && hole[3] === 255, [rS, hole]);
 
-  await A.ev(() => window.T.grad(2625, 3375, 'Yearbook'));
+  await A.ev(() => window.T.grad(600, 450, 'Typing'));
+  await A.settle(300);
+  await A.select([220, 160], [380, 290]);
+  await A.ev(() => window.app.api.setTool('text'));
+  await A.settle(300);
+  const at = await A.ev(() => window.app.api.toClient(60, 60));
+  await A.page.mouse.click(at.x, at.y);
+  await A.settle(300);
+  await A.page.keyboard.type('Hi');
+  await A.settle(200);
+  const sT0 = await A.state();
+  await A.menuFill();
+  const sT = await A.state();
+  check('AI Fill while typing finishes the text first', sT0.modal === true && sT.modal === false && sT.names.slice(-2).join() === 'Type Tool,AI Fill' && sT.layers.length === 3 && sT.active === 'AI Fill', [sT0, sT]);
+  await A.page.keyboard.press('Control+z');
+  await A.page.keyboard.press('Control+z');
+  await A.settle(300);
+  const sT2 = await A.state();
+  check('undoing both steps leaves a clean document', sT2.layers.join() === 'Background' && sT2.hi === sT0.hi && sT2.modal === false, sT2);
+  await A.ev(() => window.app.api.setTool('marquee'));
+
+  await A.ev(() => {
+    const d = window.T.rough(2625, 3375, 'Yearbook');
+    const l = d.layers[0];
+    const g = l.canvas.getContext('2d');
+    for (const [x, y] of [[300, 1800], [2200, 1750], [400, 3100], [2100, 3150], [1300, 2400]]) g.clearRect(x, y, 60, 60);
+    l.ver++;
+    d.touch('all');
+    window.T.keep('holes');
+  });
+  await A.settle(500);
+  const rO = await A.fill();
+  const sO = await A.state();
+  const cO = await A.ev(() => window.T.compare('holes', null));
+  const mO = await A.ev(() => window.T.stats('holes', { x: 1300, y: 2400, w: 60, h: 60 }));
+  const planO = sO.stats.plan;
+  check('five far-apart small holes are each filled at full resolution', rO.out === 'done' && planO.comps.length === 5 && planO.comps.every((c) => c.scale === 1) && planO.windows.every((w) => w.scale === 1 && w.w <= 512 && w.h <= 512) && planO.runs === 5, [rO, planO]);
+  check('the small holes are opaque and textured like the page', cO.alphaMin === 255 && cO.opaqueChanged === 0 && mO.detailIn >= 0.5 * mO.detailOut, [cO, mO]);
+  check('the page stays responsive while it fills', rO.gap < 400, rO);
+  times.fiveHoles = rO.ms;
+  times.longestPause = rO.gap;
+
+  await A.page.keyboard.press('Control+z');
+  await A.settle(300);
+  await A.ev(() => {
+    const spots = [];
+    for (let i = 0; i < 14; i++) spots.push([200 + ((i * 617) % 2200), 300 + ((i * 1171) % 2700)]);
+    window.T.spots = spots;
+    window.T.sel(0, 0, 2625, 3375, (g) => {
+      for (const [x, y] of spots) {
+        g.beginPath();
+        g.arc(x, y, 22, 0, 7);
+        g.fill();
+      }
+    });
+    window.T.keep('spots');
+  });
+  await A.settle(300);
+  const rZ = await A.fill();
+  const sZ = await A.state();
+  const mZ = await A.ev(() => window.T.stats('spots', { x: window.T.spots[3][0] - 12, y: window.T.spots[3][1] - 12, w: 24, h: 24 }));
+  const planZ = sZ.stats.plan;
+  check('fourteen scattered spots share the run budget without one low-resolution blob', rZ.out === 'done' && planZ.runs <= 12 && planZ.comps.length >= 10 && planZ.comps.every((c) => c.scale >= 0.4) && mZ.detailIn >= 0.5 * mZ.detailOut, [rZ, planZ.runs, planZ.comps.map((c) => c.scale), mZ]);
+  times.spots = rZ.ms;
+
+  await A.ev(() => window.T.grad(2625, 3375, 'Smooth page'));
   await A.settle(500);
   const big = await A.select([900, 1300], [1600, 2000]);
   await A.ev(() => window.T.keep('big'));
+  const runsBig = (await A.state()).stats.runs;
   const rBig = await A.fill();
   times.big = rBig.ms;
-  const sBig = await A.state();
+  const mBig = await A.ev((b) => window.T.stats('big', b), big);
   const cBig = await A.ev((b) => window.T.compare('big', b), big);
-  check('a 700 px hole in a 2625×3375 page is filled', rBig.out === 'done' && Math.abs(big.w - 700) < 30 && cBig.off <= 25 && cBig.outside === 0, [rBig, big, cBig]);
-  check('the model saw at most 512 px of the big page', sBig.stats.last.w <= 512 && sBig.stats.last.h <= 512 && sBig.stats.maxSide <= 512, sBig.stats);
+  check('a 700 px hole in a smooth 2625×3375 page is continued without the model', rBig.out === 'done' && Math.abs(big.w - 700) < 30 && mBig.worst <= 12 && cBig.outside === 0 && (await A.state()).stats.runs === runsBig, [rBig, big, mBig, cBig]);
+
+  await A.ev(() => window.T.rough(2625, 3375, 'Grainy page'));
+  await A.settle(500);
+  const tex = await A.ev(() => window.T.sel(900, 1300, 700, 700));
+  await A.ev(() => window.T.keep('tex'));
+  const rTex = await A.fill();
+  times.bigPhoto = rTex.ms;
+  const sTex = await A.state();
+  const mTex = await A.ev((b) => window.T.stats('tex', b), tex);
+  const cTex = await A.ev((b) => window.T.compare('tex', b), tex);
+  const textsTex = await A.ev(() => window.T.log.texts.slice(-14));
+  check('a 700 px hole in a grainy page is filled in pieces within the budget', rTex.out === 'done' && sTex.stats.plan.runs > 1 && sTex.stats.plan.runs <= 12 && textsTex.some((t) => /^Filling… \d+ of \d+\|$/.test(t)), [rTex, sTex.stats.plan.runs, textsTex]);
+  check('the model never sees more than 512 px', sTex.stats.maxSide <= 512 && sTex.stats.plan.windows.every((w) => Math.round(w.w * w.scale) <= 512 && Math.round(w.h * w.scale) <= 512), [sTex.stats.maxSide, sTex.stats.plan.windows]);
+  check('the pieces match the page in colour and grain', mTex.off <= 25 && cTex.outside === 0 && mTex.detailIn >= 0.6 * mTex.detailOut && mTex.detailIn <= 1.6 * mTex.detailOut, [mTex, cTex]);
+  await A.shot('ai-big');
   await A.page.keyboard.press('Control+z');
   await A.settle(300);
-  const huge = await A.select([500, 700], [2100, 2500]);
-  const rHuge = await A.fill();
-  times.huge = rHuge.ms;
-  const sHuge = await A.state();
-  const cHuge = await A.ev((b) => window.T.compare('big', b), huge);
-  check('a 1600 px hole is scaled down for the model', rHuge.out === 'done' && Math.max(sHuge.stats.last.w, sHuge.stats.last.h) === 512 && sHuge.stats.maxSide === 512, [rHuge, sHuge.stats]);
-  check('the scaled fill stays inside the selection and near the gradient', cHuge.outside === 0 && cHuge.off <= 30, cHuge);
-  await A.shot('ai-big');
+  await A.ev(() => window.T.sel(500, 700, 1600, 1800));
+  const planHuge = await A.ev(() => window.app.api.ai.plan(window.app.doc));
+  check('a 1600 px hole is planned at a coarser scale inside the budget', planHuge.runs >= 1 && planHuge.runs <= 12 && planHuge.comps[0].scale < 1 && planHuge.windows.every((w) => Math.round(w.w * w.scale) <= 512), planHuge);
 
-  await A.ev(() => window.T.grad(600, 450, 'Cancel'));
+  await A.ev(() => window.T.rough(600, 450, 'Cancel'));
   await A.settle(300);
   await A.select([220, 160], [380, 290]);
   await A.ev(() => window.T.keep('cancel'));
@@ -515,17 +866,36 @@ function inPage() {
   const rC = await A.fill();
   const sC2 = await A.state();
   check('a fill after Cancel works without downloading again', rC.out === 'done' && sC2.layers.join() === 'Background,AI Fill' && sC2.stats.downloads === sC0.stats.downloads, [rC, sC2.stats]);
-
-  await A.ev(() => {
-    window.app.api.ai.reset();
-    window.app.api.ai.state.noWorker = true;
-  });
   await A.page.keyboard.press('Control+z');
   await A.settle(300);
+  const early = await A.ev(async () => {
+    const p = window.app.api.ai.fill(window.app.doc);
+    document.querySelector('.aidialog .btn').click();
+    const out = await p;
+    const runs = window.app.api.ai.state.stats.runs;
+    await new Promise((r) => setTimeout(r, 3000));
+    return { out, runs, later: window.app.api.ai.state.stats.runs };
+  });
+  check('Cancel right at the start does not leave a model run behind', early.out === 'cancel' && early.later === early.runs && early.runs === sC2.stats.runs, [early, sC2.stats.runs]);
+
+  const bad = await A.ev(async () => {
+    const api = window.app.api;
+    api.ai.reset();
+    api.ai.state.noWorker = true;
+    const c = await caches.open('picture-market-ai-1');
+    const url = (await c.keys()).map((k) => k.url).find((u) => /ort-wasm-simd-threaded\.wasm$/.test(u));
+    const junk = new Uint8Array(14848852).fill(66);
+    junk.set([0, 0x61, 0x73, 0x6d]);
+    await c.put(url, new Response(junk, { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const first = await api.ai.fill(window.app.doc);
+    return { first, layers: window.app.doc.layers.length };
+  });
   const rL = await A.fill();
   const sL = await A.state();
+  const mL = await A.ev((b) => window.T.stats('cancel', b), sL.sel);
   const cL = await A.ev((b) => window.T.compare('cancel', b), sL.sel);
-  check('without a worker the fill runs on the main thread', rL.out === 'done' && sL.stats.worker === false && cL.off <= 25 && cL.outside === 0, [rL, sL.stats, cL]);
+  check('a broken cached runtime fails once with a plain message', bad.first === 'failed' && bad.layers === 1, bad);
+  check('the next try on the main thread works', rL.out === 'done' && sL.stats.worker === false && mL.off <= 25 && cL.outside === 0, [rL, sL.stats, mL, cL]);
   await A.ev(() => {
     window.app.api.ai.state.noWorker = false;
     window.app.api.ai.reset();
@@ -548,7 +918,7 @@ function inPage() {
   const rT = await A.fill();
   await A.settle(300);
   await A.shot('ai-texture-after');
-  const cT = await A.ev(() => { window.T.keep('tex'); return window.T.compare('tex', null); });
+  const cT = await A.ev(() => { window.T.keep('tex2'); return window.T.compare('tex2', null); });
   check('realistic: a missing corner of a texture is filled', rT.out === 'done' && cT.alphaMin === 255, [rT, cT]);
   times.texture = rT.ms;
 
@@ -560,14 +930,24 @@ function inPage() {
   await A.shot('ai-leafy-after');
   const sY = await A.state();
   const cY = await A.ev(() => { window.T.keep('leafy'); return window.T.compare('leafy', null); });
-  check('realistic: a leafy frame on an empty page is continued downwards', rY.out === 'done' && sY.layers.join() === 'AI Fill,Leaves' && cY.alphaMin === 255 && Math.max(sY.stats.last.w, sY.stats.last.h) <= 512, [rY, sY.layers, cY, sY.stats.last]);
+  check('realistic: a leafy frame on an empty page is continued downwards', rY.out === 'done' && sY.layers.join() === 'Leaves,AI Fill' && cY.alphaMin === 255 && sY.stats.plan.runs <= 12 && sY.stats.maxSide <= 512, [rY, sY.layers, cY, sY.stats.plan.runs]);
   times.leafy = rY.ms;
+  await A.ev(() => {
+    const d = window.app.api.newDoc({ w: 800, h: 1000, dpi: 72, bg: 'white', name: 'White page' });
+    window.T.add('Frame', (g) => { g.fillStyle = '#284'; g.fillRect(0, 0, 800, 300); });
+    return d.layers.length;
+  });
+  await A.settle(300);
+  const tW = await A.ev(() => window.T.log.toasts.length);
+  const rWp = await A.fill();
+  const toastsW = await A.ev((n) => window.T.log.toasts.slice(n), tW);
+  check('a frame on a white page asks for a selection', rWp.out === 'nothing' && toastsW.join('|') === NOTHING, [rWp, toastsW]);
   await A.page.close();
 
   const B = await open(iso.url);
   const isolated = await B.ev(() => self.crossOriginIsolated);
   check('PM_ISOLATE=1 makes the page cross-origin isolated', isolated === true, isolated);
-  await B.ev(() => window.T.grad(600, 450, 'Threads'));
+  await B.ev(() => window.T.rough(600, 450, 'Threads'));
   await B.settle(300);
   await B.select([220, 160], [380, 290]);
   await B.ev(() => window.T.keep('iso'));
@@ -584,7 +964,8 @@ function inPage() {
   const sI = await B.state();
   const cI = await B.ev((b) => window.T.compare('iso', b), sI.sel);
   check('the isolated page uses more than one thread', rI.out === 'done' && sI.stats.threads > 1 && sI.stats.worker === true, [rI, sI.stats]);
-  check('the threaded result is right', cI.off <= 25 && cI.outside === 0, cI);
+  const mI = await B.ev((b) => window.T.stats('iso', b), sI.sel);
+  check('the threaded result is right', mI.off <= 25 && cI.outside === 0, [mI, cI]);
   const rI2 = await B.fill();
   times.threadedRepeat = rI2.ms;
   await B.ev(() => window.app.api.setTool('text'));

@@ -586,12 +586,17 @@ function fillWith(color, opacity = 1, name = 'Fill') {
   tg.l.ver++;
   d.endPaint(name, ps, { x: 0, y: 0, w: c.width, h: c.height });
 }
+function runAiFill(opts) {
+  if (!doc()) return undefined;
+  if (app.modal) endModal(true);
+  return aiFill(doc(), opts);
+}
 async function fillDialog() {
   const v = { use: 'fg', opacity: 100 };
   const ok = await dialog('Fill', form([S('use', 'Contents', [['fg', 'Foreground Color'], ['bg', 'Background Color'], ['color', 'Color…'], ['ai', 'Content-Aware (AI)'], ['black', 'Black'], ['gray', '50% Gray'], ['white', 'White']], 'fg'), R('opacity', 'Opacity', 1, 100, 100)], v, () => {}), undefined, { width: 320 });
   if (!ok) return;
   if (v.use === 'ai') {
-    await aiFill(doc());
+    await runAiFill({ opacity: v.opacity / 100 });
     return;
   }
   let c = app.fg;
@@ -768,7 +773,7 @@ const CMD = {
   paste: pasteClip,
   clear: () => doc() && clearSel(),
   fill: () => doc() && fillDialog(),
-  aiFill: () => doc() && aiFill(doc()),
+  aiFill: () => runAiFill(),
   fillFg: () => doc() && fillWith(app.fg),
   fillBg: () => doc() && fillWith(app.bg),
   stroke: () => doc() && strokeDialog(),
