@@ -4,6 +4,7 @@ import { app, view, fit, invalidate } from './view.js';
 import { endModal } from './tools.js';
 
 export const PRESETS = [
+  { name: 'Yearbook Page + Bleed 8.75 × 11.25 in', w: 2625, h: 3375, dpi: 300 },
   { name: 'Yearbook Page 8.5 × 11 in', w: 2550, h: 3300, dpi: 300 },
   { name: 'Yearbook Page 9 × 12 in', w: 2700, h: 3600, dpi: 300 },
   { name: 'Yearbook Page 7.75 × 10.5 in', w: 2325, h: 3150, dpi: 300 },

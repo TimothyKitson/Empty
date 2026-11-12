@@ -1110,6 +1110,14 @@ const CMD = {
   align,
   newGuide: () => doc() && newGuide(),
   marginGuides: () => doc() && marginGuides(),
+  bleedGuides: () => {
+    const d = doc();
+    if (!d) return;
+    const n = d.dpi * 0.125;
+    d.guides.push({ v: true, pos: n }, { v: true, pos: d.w - n }, { v: false, pos: n }, { v: false, pos: d.h - n });
+    invalidate();
+    toast('Trim guides added 0.125 in from each edge. Keep backgrounds running past them and important things inside.');
+  },
   centerGuides: () => {
     const d = doc();
     if (!d) return;
@@ -1207,7 +1215,7 @@ export const MENUS = [
   { id: 'filter', label: 'Filter', items: () => [{ label: 'Last Filter', cmd: 'lastFilter', key: 'Alt+Ctrl+F', on: () => !!(doc() && app.lastFilter) }, '-', ...filterItems()] },
   { id: 'view', label: 'View', items: () => [
     I('Zoom In', 'zoomIn', 'Ctrl+='), I('Zoom Out', 'zoomOut', 'Ctrl+-'), I('Fit on Screen', 'fit', 'Ctrl+0'), I('100%', 'actual', 'Ctrl+1'), '-',
-    I('New Guide…', 'newGuide'), I('Center Guides', 'centerGuides'), I('Margin Guides…', 'marginGuides'), I('Clear Guides', 'clearGuides'), '-',
+    I('New Guide…', 'newGuide'), I('Center Guides', 'centerGuides'), I('Margin Guides…', 'marginGuides'), I('Bleed Guides (0.125 in)', 'bleedGuides'), I('Clear Guides', 'clearGuides'), '-',
     { label: 'Full Screen', cmd: 'fullscreen', key: 'F' }, { label: 'Show/Hide Panels', cmd: 'panels', key: 'Tab' }
   ] },
   { id: 'help', label: 'Help', items: () => [{ label: 'Keyboard Shortcuts…', cmd: 'shortcuts' }, { label: 'About Picture Market…', cmd: 'about' }] }
