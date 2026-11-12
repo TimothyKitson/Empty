@@ -5,7 +5,7 @@
   "description": "Browser photo editor with layers, selections, filters and print-ready export",
   "scripts": {
     "serve": "node dev/serve.js",
-    "test": "node dev/smoke.js && node dev/smoke2.js && node dev/smoke3.js && node dev/smoke4.js",
+    "test": "node dev/smoke.js && node dev/smoke2.js && node dev/smoke3.js && node dev/smoke4.js && node dev/smoke5.js && node dev/smoke6.js",
     "build": "node dev/build.js"
   },
   "devDependencies": {

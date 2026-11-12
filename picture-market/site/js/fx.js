@@ -217,7 +217,7 @@ function boxPass(src, dst, w, hh, r, horiz) {
       let sum = 0;
       const first = src[base + c];
       const last = src[base + (len - 1) * step + c];
-      sum = first * (r + 1);
+      sum = first * r;
       for (let i = 0; i < r; i++) sum += i < len ? src[base + i * step + c] : last;
       for (let i = 0; i < len; i++) {
         const add = i + r < len ? src[base + (i + r) * step + c] : last;

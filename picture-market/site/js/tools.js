@@ -1627,16 +1627,19 @@ export function startTransform() {
   const before = doc.snap();
   let floated = false;
   if (doc.sel && l.type === 'raster') {
+    const k = deconFor(doc, l);
     const b = doc.sel.b;
     const piece = mk(b.w, b.h);
     const pg = cx(piece);
     pg.drawImage(l.canvas, l.x - b.x, l.y - b.y);
     pg.globalCompositeOperation = 'destination-in';
     pg.drawImage(doc.sel.c, -b.x, -b.y);
+    if (k) deconStamp(piece, b.x, b.y, doc.w, k, deconPaint(k, 'lift'));
     const hole = clone(l.canvas);
     const hg = cx(hole);
     hg.globalCompositeOperation = 'destination-out';
     hg.drawImage(doc.sel.c, -l.x, -l.y);
+    if (k) deconStamp(hole, l.x, l.y, doc.w, k, deconPaint(k, 'clear'));
     l.canvas = hole;
     l.ver++;
     const fl = new Layer({ name: 'Floating Selection', canvas: piece, x: b.x, y: b.y, opacity: 1 });
