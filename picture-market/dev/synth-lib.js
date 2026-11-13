@@ -231,8 +231,13 @@ function loadFixture(name) {
   return decodePng(fs.readFileSync(png));
 }
 
-function loadCore() {
-  const text = fs.readFileSync(path.join(ROOT, 'site', 'js', 'synth.js'), 'utf8');
+function corePath() {
+  const work = path.join(ROOT, 'dev', 'synth-work.js');
+  return (process.argv.includes('--work') || process.env.SYNTH_WORK === '1') && fs.existsSync(work) ? work : path.join(ROOT, 'site', 'js', 'synth.js');
+}
+
+function loadCore(file) {
+  const text = fs.readFileSync(file || corePath(), 'utf8');
   if (!text.startsWith('export function synthCore()')) throw new Error('synth.js must start with the synthCore export');
   return new Function(text.replace('export function synthCore', 'function synthCore') + '\nreturn synthCore;')();
 }
@@ -599,6 +604,44 @@ function metrics(truth, res, target, known, w, h) {
       }
     }
   }
+  const tgF = Float32Array.from(tg);
+  const outF = new Float32Array(cw * ch);
+  for (let i = 0; i < cw * ch; i++) outF[i] = kn[i] && !tg[i] ? 1 : 0;
+  const nearOut = boxBlur(outF, cw, ch, 6);
+  let eRim = 0;
+  let nRim = 0;
+  for (let y = 1; y < ch - 1; y++) {
+    for (let x = 1; x < cw - 1; x++) {
+      const i = y * cw + x;
+      if (tg[i] && nearOut[i] > 0) {
+        eRim += Math.abs(lr[i] - hr[i]);
+        nRim++;
+      }
+    }
+  }
+  const sideIn = boxBlur(lr, cw, ch, 3, tg);
+  const sideOut = boxBlur(lr, cw, ch, 3, outF);
+  const truthIn = boxBlur(lt, cw, ch, 3, tg);
+  const truthOut = boxBlur(lt, cw, ch, 3, outF);
+  let seamB = 0;
+  let seamBT = 0;
+  let seamT = 0;
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = y * cw + x;
+      if (!tg[i]) continue;
+      for (let k = 0; k < 4; k++) {
+        const xx = x + (k === 0 ? 1 : k === 1 ? -1 : 0);
+        const yy = y + (k === 2 ? 1 : k === 3 ? -1 : 0);
+        if (xx < 0 || yy < 0 || xx >= cw || yy >= ch) continue;
+        const j = yy * cw + xx;
+        if (!outF[j]) continue;
+        seamB += Math.abs(sideIn[i] - sideOut[j]);
+        seamBT += Math.abs(truthIn[i] - truthOut[j]);
+        seamT += Math.abs(lt[i] - lt[j]);
+      }
+    }
+  }
   const dIn = nIn ? eIn / nIn : 0;
   const dRing = nRing ? eRing / nRing : 0;
   const dTruth = nIn ? eTruth / nIn : 0;
@@ -608,7 +651,11 @@ function metrics(truth, res, target, known, w, h) {
     mae: r2(mae), low: r2(low), detail: dRing > 0.05 ? r2(dIn / dRing) : dIn < 0.05 ? 1 : 99,
     detailTruth: dTruth > 0.05 ? r2(dIn / dTruth) : dIn < 0.05 ? 1 : 99,
     detailKnown: nKnown && eKnown / nKnown > 0.05 ? r2(dIn / (eKnown / nKnown)) : dIn < 0.05 ? 1 : 99,
-    seam: nSeam ? (typ > 0.05 ? r2(seam / nSeam / typ) : seam / nSeam < 0.05 ? 1 : 99) : 0
+    seam: nSeam ? (typ > 0.05 ? r2(seam / nSeam / typ) : seam / nSeam < 0.05 ? 1 : 99) : 0,
+    seamTruth: nSeam && typ > 0.05 ? r2(seamT / nSeam / typ) : 1,
+    seamB: nSeam && typ > 0.05 ? r2(seamB / nSeam / typ) : 0,
+    seamBTruth: nSeam && typ > 0.05 ? r2(seamBT / nSeam / typ) : 0,
+    rim: nRim ? (dRing > 0.05 ? r2(eRim / nRim / dRing) : eRim / nRim < 0.05 ? 1 : 99) : 1
   };
 }
 
@@ -642,6 +689,6 @@ function runJob(synthCore, job, slice = 0) {
 }
 
 module.exports = {
-  ROOT, FIX, SHOTS, FIXTURES, encodePng, decodePng, fetchFixtures, decodeFixtures, loadFixture, loadCore, rng, blob, rect, boundsOf,
+  ROOT, FIX, SHOTS, FIXTURES, encodePng, decodePng, fetchFixtures, decodeFixtures, loadFixture, loadCore, corePath, rng, blob, rect, boundsOf,
   crop, resize, fit, marked, fieldImage, sheet, savePng, metrics, hash, runJob, blur3, lumaPlane
 };

@@ -158,13 +158,13 @@ function packMask(mask) {
   return b.toString('base64');
 }
 
-async function openEngine(browser, base, minified) {
+async function openEngine(browser, base, minified, rel) {
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e.stack || e)));
   await page.goto(base + 'dev/serve.js');
   await page.evaluate(inPage);
-  await page.evaluate((u) => window.S.load('plain', u), base + 'site/js/synth.js');
+  await page.evaluate((u) => window.S.load('plain', u), base + (rel || 'site/js/synth.js'));
   await page.evaluate((t) => window.S.loadText('min', t), minified);
   return { page, errors };
 }

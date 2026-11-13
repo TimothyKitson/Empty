@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const lib = require('./synth-lib');
 const { CASES, QUICK, V1, procedural, PAGE_W, PAGE_H, BAND } = require('./synth-cases');
+const { makeSheet } = require('./synth-sheet');
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes('--' + name);
@@ -15,7 +16,7 @@ const ONLY = value('only', '');
 const TAG = value('tag', '');
 const TUNE = JSON.parse(value('tune', 'null'));
 const SEED = Number(value('seed', '7'));
-const EXPERIMENT = !!ONLY || !!TUNE;
+const EXPERIMENT = !!ONLY || !!TUNE || flag('cases-only');
 const WITH_CHECKS = !EXPERIMENT || flag('checks');
 const WITH_BROWSER = (!EXPERIMENT || flag('browser')) && !flag('no-browser');
 const WITH_V1 = !QUICKRUN && !flag('no-v1') && (!EXPERIMENT || flag('v1'));
@@ -40,44 +41,6 @@ const check = (name, ok, info) => {
 function pad(s, nn) {
   s = String(s);
   return s.length >= nn ? s + ' ' : s + ' '.repeat(nn - s.length);
-}
-
-function zoomAt(c, b, which) {
-  const { w, target } = c;
-  let px = Math.min(c.w - 1, b.x + (b.w >> 1));
-  let py = Math.min(c.h - 1, b.y + (b.h >> 1));
-  if (which === 0) while (px < w - 1 && target[py * w + px]) px++;
-  else while (py > 0 && target[py * w + px]) py--;
-  return { x: px, y: py };
-}
-
-function makeSheet(c, res, v1, file) {
-  const { w, h } = c;
-  const b = lib.boundsOf(c.target, w, h);
-  const m = Math.round(Math.max(60, Math.max(b.w, b.h) * 0.35));
-  const x0 = Math.max(0, b.x - m);
-  const y0 = Math.max(0, b.y - m);
-  const cw = Math.min(w, b.x + b.w + m) - x0;
-  const ch = Math.min(h, b.y + b.h + m) - y0;
-  const full = (rgba) => ({ w, h, rgba });
-  const PW = v1 ? 392 : 520;
-  const over = (img) => lib.fit(lib.crop(img, x0, y0, cw, ch), PW, 440);
-  const input = lib.marked(full(c.rgba), c.target, c.known);
-  const fld = lib.fieldImage(w, h, res.field);
-  const row1 = [over(full(c.truth)), over(input), over(full(res.rgba))];
-  if (v1) row1.push(over(full(v1)));
-  const rows = [row1];
-  for (let k = 0; k < 2; k++) {
-    const z = zoomAt(c, b, k);
-    const zx = Math.max(0, Math.min(w - PW, z.x - (PW >> 1)));
-    const zy = Math.max(0, Math.min(h - 360, z.y - 180));
-    const zc = (img) => lib.crop(img, zx, zy, Math.min(PW, w), Math.min(360, h));
-    const row = [zc(full(c.truth)), zc(full(res.rgba))];
-    if (v1) row.push(zc(full(v1)));
-    row.push(k === 0 ? zc(fld) : over(fld));
-    rows.push(row);
-  }
-  lib.savePng(file, lib.sheet(rows));
 }
 
 function maxDiff(a, b, mask, want) {
@@ -118,7 +81,7 @@ function tiny(w, h, paint, hole, know) {
 }
 
 function runChecks(synthCore) {
-  const text = fs.readFileSync(path.join(lib.ROOT, 'site', 'js', 'synth.js'), 'utf8');
+  const text = fs.readFileSync(lib.corePath(), 'utf8');
   check('the engine file exports only synthCore and has no comments, imports or Math.random', (text.match(/^export /gm) || []).length === 1 && !/Math\.random|^\s*import |\/\/|\/\*|document\.|window\./m.test(text), null);
   let free = 'ok';
   try {
@@ -218,8 +181,8 @@ async function runBrowser(synthCore) {
   const browser = await chromium.launch();
   const rows = [];
   try {
-    const min = esbuild.transformSync(fs.readFileSync(path.join(lib.ROOT, 'site', 'js', 'synth.js'), 'utf8'), { minify: true, format: 'esm', target: 'es2022' }).code;
-    const { page, errors } = await openEngine(browser, srv.url, min);
+    const min = esbuild.transformSync(fs.readFileSync(lib.corePath(), 'utf8'), { minify: true, format: 'esm', target: 'es2022' }).code;
+    const { page, errors } = await openEngine(browser, srv.url, min, path.relative(lib.ROOT, lib.corePath()).split(path.sep).join('/'));
     await page.evaluate((u) => window.S.image('lake', u), srv.url + 'dev/fixtures/lake.png');
     await page.evaluate(([u, c]) => window.S.image('page', u, c), [srv.url + 'dev/fixtures/ferns.png', { x: 0, y: 300, w: PAGE_W, h: PAGE_H }]);
     const spec = { image: 'lake', rect: { x: 520, y: 380, w: 300, h: 220 }, seed: 9 };
@@ -335,7 +298,7 @@ async function main() {
   let speed = [];
   if (WITH_BROWSER) speed = await runBrowser(synthCore);
   if (WITH_CHECKS && !QUICKRUN && fs.existsSync(path.join(lib.FIX, 'ferns.png'))) {
-    const out = require('child_process').execFileSync(process.execPath, ['--expose-gc', path.join(__dirname, 'synth-mem.js'), 'page-C'], { encoding: 'utf8' });
+    const out = require('child_process').execFileSync(process.execPath, ['--expose-gc', path.join(__dirname, 'synth-mem.js'), 'page-C'].concat(flag('work') ? ['--work'] : []), { encoding: 'utf8' });
     const mem = JSON.parse(out.trim().split('\n').pop());
     check('the whole-page case peaks under 600 MB (engine arrays ' + mem.peakMB + ' MB, process ' + mem.rssMB + ' MB)', mem.rssMB < 600, mem);
     notes.push('memory, page case: ' + mem.peakMB + ' MB of typed arrays at the peak (result included, inputs not), ' + mem.perMegapixelMB + ' MB per megapixel of working area');
