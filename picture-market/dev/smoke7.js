@@ -4,8 +4,13 @@ const { chromium } = require('playwright');
 const { serve } = require('./serve');
 const { fetchAi } = require('./fetch-ai');
 
-const NOTHING = 'Nothing is empty on this page. Select the area you want filled in first.';
+const SELECT = 'Select the area to fill first: draw around it with the Lasso, then choose AI Fill again.';
+const EMPTY_SEL = 'The selection is empty. Draw around the area you want filled, then choose AI Fill again.';
+const NOT_EMPTY = 'Nothing is empty inside the selection.';
 const NO_PICTURE = 'There is no solid picture on this page for the AI to continue from.';
+const NO_AROUND = 'There is no solid picture around that area for the AI to continue from.';
+const HOLES = 'Filling the empty space inside the selection';
+const REPLACE = 'Replacing what is inside the selection';
 const NO_DOWNLOAD = 'The AI model could not be downloaded. Check the internet connection and try again.';
 const ZIP_NAMES = ['LICENSES.txt', '_headers', 'ai/migan_pipeline_v2.onnx', 'ai/ort-wasm-simd-threaded.wasm', 'ai/ort.wasm.bundle.min.mjs', 'index.html'];
 
@@ -47,8 +52,8 @@ function inPage() {
     }
     const t = document.querySelector('.aitext');
     if (!t) return;
-    const what = document.querySelector('.aiwhat').textContent;
-    if (log.what[log.what.length - 1] !== what) log.what.push(what);
+    const what = document.querySelector('.aiwhat').textContent.trim();
+    if (what && log.what[log.what.length - 1] !== what) log.what.push(what);
     const s = t.textContent + '|' + document.querySelector('.aipct').textContent;
     if (log.texts[log.texts.length - 1] !== s) log.texts.push(s);
   }).observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -124,6 +129,23 @@ function inPage() {
         g.fillRect(0, 0, 450, 700);
         g.fillStyle = 'rgb(31,58,147)';
         g.fillRect(450, 0, 450, 700);
+      });
+    },
+    cut(d, holes) {
+      return paint(d, (g) => holes.forEach((r) => g.clearRect(r[0], r[1], r[2], r[3])));
+    },
+    side(name) {
+      const d = api.newDoc({ w: 900, h: 600, dpi: 72, bg: 'transparent', name });
+      const l = d.layers[0];
+      l.canvas = document.createElement('canvas');
+      l.canvas.width = 900;
+      l.canvas.height = 600;
+      return paint(d, (g) => {
+        const a = g.createLinearGradient(0, 0, 0, 600);
+        a.addColorStop(0, 'rgb(60,197,90)');
+        a.addColorStop(1, 'rgb(130,190,110)');
+        g.fillStyle = a;
+        g.fillRect(0, 0, 300, 600);
       });
     },
     add(name, draw, opt) {
@@ -382,11 +404,69 @@ function inPage() {
       for (let y = Math.max(0, b.y - 6); y < Math.min(d.h - 1, b.y + b.h + 6); y++) step((y * d.w + mx) * 4, ((y + 1) * d.w + mx) * 4);
       return { sameBox: l.x === b.x && l.y === b.y && l.canvas.width === b.w && l.canvas.height === b.h, diff, partial, jump };
     },
-    async fill() {
+    region(box) {
+      const d = window.app.doc;
+      const b = pixels(d);
+      let alphaMin = 255;
+      let alphaMax = 0;
+      for (let y = box.y; y < box.y + box.h; y++) {
+        for (let x = box.x; x < box.x + box.w; x++) {
+          const v = b[(y * d.w + x) * 4 + 3];
+          if (v < alphaMin) alphaMin = v;
+          if (v > alphaMax) alphaMax = v;
+        }
+      }
+      return { alphaMin, alphaMax };
+    },
+    audit(key, truth) {
+      const d = window.app.doc;
+      const a = kept[key];
+      const t = truth ? kept[truth] : null;
+      const b = pixels(d);
+      const l = d.layers[d.layers.length - 1];
+      const lw = l.canvas.width;
+      const lh = l.canvas.height;
+      const la = l.canvas.getContext('2d').getImageData(0, 0, lw, lh).data;
+      const cov = d.sel.c.getContext('2d').getImageData(0, 0, d.w, d.h).data;
+      const r = {
+        layer: { x: l.x, y: l.y, w: lw, h: lh }, changed: 0, opaqueChanged: 0, outsideChanged: 0, opaqueInside: 0, soft: 0, unfilled: 0,
+        alphaOff: 0, pageOff: 0, coverOff: 0, partial: 0, beyond: 0, onOpaque: 0, edgeOff: 0, fillOff: 0
+      };
+      for (let y = 0, p = 0; y < d.h; y++) {
+        for (let x = 0; x < d.w; x++, p += 4) {
+          const c = cov[p + 3];
+          const was = a[p + 3];
+          const inside = x >= l.x && y >= l.y && x < l.x + lw && y < l.y + lh;
+          const top = inside ? la[((y - l.y) * lw + x - l.x) * 4 + 3] : 0;
+          if (a[p] !== b[p] || a[p + 1] !== b[p + 1] || a[p + 2] !== b[p + 2] || was !== b[p + 3]) {
+            r.changed++;
+            if (was === 255) r.opaqueChanged++;
+            if (!c) r.outsideChanged++;
+          }
+          if (c && was === 255) r.opaqueInside++;
+          if (c && was > 0 && was < 255) r.soft++;
+          if (c === 255 && was < 240 && b[p + 3] < 255) r.unfilled++;
+          if (top > 0 && top < 255) r.partial++;
+          if (top && !c) r.beyond++;
+          if (top && was === 255) r.onOpaque++;
+          r.coverOff = Math.max(r.coverOff, Math.abs(top - c));
+          if (c && was === 0) {
+            r.alphaOff = Math.max(r.alphaOff, Math.abs(top - c));
+            r.pageOff = Math.max(r.pageOff, Math.abs(b[p + 3] - c));
+          }
+          if (!t || c < 255 || was === 255) continue;
+          const off = Math.max(Math.abs(b[p] - t[p]), Math.abs(b[p + 1] - t[p + 1]), Math.abs(b[p + 2] - t[p + 2]));
+          if (was > 0) r.edgeOff = Math.max(r.edgeOff, off);
+          else r.fillOff = Math.max(r.fillOff, off);
+        }
+      }
+      return r;
+    },
+    async fill(opts) {
       const t0 = performance.now();
       log.gap = 0;
       beat = t0;
-      const out = await api.ai.fill(window.app.doc);
+      const out = await api.ai.fill(window.app.doc, opts || {});
       return { out, ms: Math.round(performance.now() - t0), gap: Math.round(log.gap) };
     }
   };
@@ -410,6 +490,7 @@ function inPage() {
   const times = {};
   const expected = /migan_pipeline_v2\.onnx|ort\.wasm\.bundle\.min\.mjs/;
   const check = (name, ok, info) => { if (!ok) fails.push(name + ' ' + JSON.stringify(info)); else console.log('ok  ' + name); };
+  const note = (name, data) => console.log('info ' + name + ' ' + JSON.stringify(data));
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   const open = async (base) => {
@@ -462,13 +543,61 @@ function inPage() {
       await waitClosed(n);
       return Date.now() - t0;
     };
-    const fill = () => ev(() => window.T.fill());
+    const lasso = async (pts) => {
+      await ev(() => {
+        window.app.api.setTool('lasso');
+        window.app.opts.lasso.feather = 0;
+        window.app.opts.lasso.mode = 'new';
+      });
+      await settle(250);
+      const at = [];
+      for (const p of pts) at.push(await cli(p[0], p[1]));
+      await page.mouse.move(at[0].x, at[0].y);
+      await page.mouse.down();
+      for (const q of at.slice(1)) await page.mouse.move(q.x, q.y, { steps: 6 });
+      await page.mouse.up();
+      await settle();
+      return ev(() => window.app.doc.sel && { ...window.app.doc.sel.b });
+    };
+    const fillDialog = async () => {
+      await menu(['Edit', 'Fill…']);
+      await settle(200);
+      await page.locator('.dialog select').selectOption('ai');
+      await page.locator('.dialog .btn.primary').click();
+    };
+    const fill = (opts) => ev((o) => window.T.fill(o), opts);
+    const all = () => ev(() => { window.app.api.run('selAll'); });
+    const toasts = (n = 0) => ev((n) => window.T.log.toasts.slice(n), n);
     const state = () => ev(() => window.T.state());
     const shot = (n) => page.screenshot({ path: path.join(shots, n + '.png') });
-    return { page, ev, settle, select, menu, menuFill, fill, state, shot, closed, waitClosed };
+    return { page, ev, settle, select, lasso, menu, menuFill, fillDialog, fill, all, toasts, state, shot, closed, waitClosed };
   };
 
   const A = await open(srv.url);
+  const asked = [];
+  A.page.on('request', (r) => { if (/migan_pipeline|ort-wasm|ort\.wasm/.test(r.url())) asked.push(r.url()); });
+  await A.ev(() => {
+    window.T.cut(window.T.rough(600, 450, 'Unselected'), [[250, 180, 100, 80]]);
+    window.T.keep('unselected');
+  });
+  await A.settle(300);
+  const sNo0 = await A.state();
+  const rNo = await A.ev(() => window.app.api.run('aiFill'));
+  await A.menu(['Edit', 'AI Fill']);
+  await A.settle(200);
+  await A.fillDialog();
+  await A.settle(400);
+  const planNo = await A.ev(() => window.app.api.ai.plan(window.app.doc));
+  const sNo = await A.state();
+  const logNo = await A.ev(() => ({ toasts: window.T.log.toasts.slice(), opened: window.T.log.opened }));
+  const cNo = await A.ev(() => window.T.compare('unselected', null));
+  check('without a selection AI Fill answers select', rNo === 'select' && planNo.none === 'select', [rNo, planNo]);
+  check('without a selection the command, the menu and Fill… each show the one hint', logNo.toasts.length === 3 && logNo.toasts.every((t) => t === SELECT), logNo.toasts);
+  check('without a selection no dialog opens and nothing is downloaded', logNo.opened === 0 && asked.length === 0 && sNo.stats.downloads === 0 && sNo.stats.sessions === 0, [logNo, asked, sNo.stats]);
+  check('without a selection the layers, history and pixels stay as they were', sNo.layers.join() === 'Background' && sNo.hist === sNo0.hist && sNo.hi === sNo0.hi && cNo.outside === 0 && cNo.inside === 0, [sNo0, sNo, cNo]);
+
+  note('no selection', { out: rNo, plan: planNo, toasts: logNo.toasts.length, dialogs: logNo.opened, requests: asked.length, downloads: sNo.stats.downloads, changed: cNo.outside + cNo.inside });
+
   await A.ev(() => window.T.rough(600, 450, 'Grain'));
   await A.settle(300);
   const box = await A.select([220, 160], [380, 290]);
@@ -490,7 +619,7 @@ function inPage() {
   const texts = await A.ev(() => window.T.log.texts.slice());
   const what1 = await A.ev(() => window.T.log.what.slice());
   check('the next attempt after a failure works', s1.stats.sessions === 1 && s1.stats.runs === 1, s1.stats);
-  check('the dialog says what is being filled', what1.join() === 'Filling the selected area', what1);
+  check('a selection on solid picture is replaced, and the dialog says so', what1.join() === REPLACE && s1.stats.plan.kind === 'replace', [what1, s1.stats.plan.kind]);
   check('the dialog reports the download with a percentage', texts.some((t) => /^Getting the AI ready — 43 MB, first time only\|\d+%$/.test(t)), texts);
   check('the dialog then says Filling…', texts.includes('Filling…|'), texts);
   check('files come from ' + (local ? 'next to the page' : 'the public URLs'), s1.stats.home === (local ? 'local' : 'public'), s1.stats);
@@ -644,6 +773,7 @@ function inPage() {
     l.ver++;
     d.touch('all');
     window.T.keep('blanks');
+    window.app.api.run('selAll');
     window.T.log.what.length = 0;
   });
   await A.settle(300);
@@ -653,8 +783,8 @@ function inPage() {
   const cB = await A.ev(() => window.T.compare('blanks', null));
   const corner = await A.ev(() => window.T.compare('truth', { x: 400, y: 10, w: 80, h: 80 }));
   const whatB = await A.ev(() => window.T.log.what.slice());
-  check('no selection fills the blanks with a layer on top', rB.out === 'done' && sB.layers.join() === 'Background,AI Fill' && sB.active === 'AI Fill', [rB, sB.layers, sB.active]);
-  check('the dialog says the empty areas are being filled', whatB.join() === 'Filling the empty areas of the page', whatB);
+  check('Select All fills the blanks with a layer on top', rB.out === 'done' && sB.stats.plan.kind === 'holes' && sB.layers.join() === 'Background,AI Fill' && sB.active === 'AI Fill', [rB, sB.layers, sB.active]);
+  check('the dialog says the empty space inside the selection is being filled', whatB.join() === HOLES, whatB);
   check('the document is fully opaque afterwards', cB.alphaMin === 255, cB);
   check('every previously opaque pixel is unchanged', cB.opaqueChanged === 0, cB);
   check('the filled corner continues the picture', corner.off <= 45, corner);
@@ -676,13 +806,16 @@ function inPage() {
     window.T.log.texts.length = 0;
   });
   await A.settle(300);
+  await A.menu(['Select', 'All']);
+  await A.settle(300);
   const sK0 = await A.state();
   const rK = await A.fill();
   const sK = await A.state();
   const cK = await A.ev(() => window.T.compare('corners', null));
   const textsK = await A.ev(() => window.T.log.texts.slice());
   check('two separate blanks are filled one after the other', rK.out === 'done' && sK.stats.runs === sK0.stats.runs + 2 && textsK.includes('Filling… 2 of 2|'), [rK, sK.stats, textsK]);
-  check('both blanks end up opaque in one layer and one history step', cK.alphaMin === 255 && cK.opaqueChanged === 0 && sK.layers.join() === 'Background,AI Fill' && sK.hist === sK0.hist + 1, [cK, sK]);
+  check('Select ▸ All fills every empty area in one layer and one history step', sK.stats.plan.kind === 'holes' && cK.alphaMin === 255 && cK.opaqueChanged === 0 && sK.layers.join() === 'Background,AI Fill' && sK.hist === sK0.hist + 1 && sK0.last === 'Select All', [cK, sK]);
+  note('Select ▸ All with two empty corners', { kind: sK.stats.plan.kind, alphaMin: cK.alphaMin, opaqueChanged: cK.opaqueChanged, runs: sK.stats.runs - sK0.stats.runs });
   await A.shot('ai-corners');
 
   await A.ev(() => {
@@ -720,21 +853,177 @@ function inPage() {
   const farY = Math.max(...[0, 1, 2].map((k) => Math.abs(beside[0][k] - beside[1][k])));
   check('an empty area beside a smooth picture gets its colour, not a texture', rYy.out === 'done' && beside[0][3] === 255 && farY <= 20 && (await A.state()).stats.runs === runsY, [rYy, beside]);
 
-  await A.ev(() => window.T.grad(300, 200, 'Opaque'));
+  await A.ev(() => {
+    const d = window.T.rough(600, 450, 'Two holes');
+    window.T.keep('two:whole');
+    window.T.cut(d, [[120, 120, 90, 70], [400, 260, 90, 70]]);
+    window.T.keep('two');
+    window.T.log.what.length = 0;
+  });
+  await A.settle(300);
+  const loop = await A.lasso([[96, 98], [170, 86], [246, 102], [252, 160], [236, 214], [150, 226], [92, 196]]);
+  const sH0 = await A.state();
+  await A.menuFill();
+  const sH = await A.state();
+  const aH = await A.ev(() => window.T.audit('two'));
+  const nearH = await A.ev(() => window.T.region({ x: 120, y: 120, w: 90, h: 70 }));
+  const farH = await A.ev(() => window.T.region({ x: 400, y: 260, w: 90, h: 70 }));
+  const mH = await A.ev(() => window.T.stats('two:whole', { x: 120, y: 120, w: 90, h: 70 }));
+  const whatH = await A.ev(() => window.T.log.what.slice());
+  check('the lasso was drawn loosely around one hole with the mouse', !!loop && loop.w > 130 && loop.h > 110 && sH0.last === 'Lasso' && aH.opaqueInside > 5000, [loop, sH0.last, aH.opaqueInside]);
+  check('a lasso around one of two holes fills only that hole', sH.stats.plan.kind === 'holes' && nearH.alphaMin === 255 && aH.changed === 6300 && aH.unfilled === 0 && JSON.stringify(aH.layer) === JSON.stringify({ x: 120, y: 120, w: 90, h: 70 }), [sH.stats.plan.kind, nearH, aH]);
+  check('the other hole is still fully transparent', farH.alphaMax === 0 && aH.outsideChanged === 0 && aH.beyond === 0, [farH, aH]);
+  check('every opaque pixel is bit-identical, the picture inside the lasso included', aH.opaqueChanged === 0 && aH.onOpaque === 0, aH);
+  check('the dialog says the empty space inside the selection is filled', whatH.join() === HOLES, whatH);
+  check('the hole inside the lasso gets the colour and grain around it', mH.off <= 25 && mH.detailIn >= 0.6 * mH.detailOut && mH.detailIn <= 1.6 * mH.detailOut, mH);
+  check('filling a hole is one layer on top, one history step, and the lasso stays', sH.layers.join() === 'Background,AI Fill' && sH.active === 'AI Fill' && sH.hist === sH0.hist + 1 && JSON.stringify(sH.sel) === JSON.stringify(sH0.sel), [sH0, sH]);
+  note('lasso around one of two holes', { lasso: loop, kind: sH.stats.plan.kind, layer: aH.layer, changed: aH.changed, opaqueInLasso: aH.opaqueInside, opaqueChanged: aH.opaqueChanged, outsideChanged: aH.outsideChanged, filledHole: nearH, otherHole: farH, colour: mH });
+  await A.ev(() => window.app.api.run('deselect'));
   await A.settle(200);
-  const sN0 = await A.state();
-  const tN = await A.ev(() => window.T.log.toasts.length);
-  const rN = await A.ev(() => window.app.api.run('aiFill'));
-  const sN = await A.state();
-  const toastsN = await A.ev((n) => window.T.log.toasts.slice(n), tN);
-  check('nothing to fill shows the hint', rN === 'nothing' && toastsN.join('|') === NOTHING, [rN, toastsN]);
-  check('nothing to fill makes no history step', sN.hist === sN0.hist && sN.layers.length === 1 && sN.stats.runs === sN0.stats.runs, sN);
-  await A.ev(() => window.app.api.newDoc({ w: 300, h: 200, dpi: 72, bg: 'transparent', name: 'Empty' }));
+  await A.shot('ai-one-hole');
+
+  await A.ev(() => {
+    window.T.side('Across');
+    window.T.keep('across');
+  });
+  await A.settle(300);
+  const loopX = await A.lasso([[190, 210], [330, 150], [470, 190], [500, 330], [400, 430], [230, 410]]);
+  const rAx = await A.fill();
+  const sAx = await A.state();
+  const aAx = await A.ev(() => window.T.audit('across'));
+  const restAx = await A.ev(() => window.T.region({ x: 520, y: 0, w: 380, h: 600 }));
+  const pxAx = await A.ev(() => [window.app.api.pixel(330, 300), window.app.api.pixel(290, 300)]);
+  const stepAx = Math.max(...[0, 1, 2].map((k) => Math.abs(pxAx[0][k] - pxAx[1][k])));
+  check('a lasso from the picture into empty space fills only the empty part inside it', rAx.out === 'done' && sAx.stats.plan.kind === 'holes' && !!loopX && loopX.x < 300 && loopX.x + loopX.w > 450 && aAx.opaqueInside > 5000 && aAx.changed > 20000 && aAx.unfilled === 0 && aAx.layer.x >= 299 && pxAx[0][3] === 255 && stepAx <= 20, [rAx, loopX, aAx, pxAx]);
+  check('the cut along the lasso is anti-aliased and nothing lies beyond it', aAx.partial > 100 && aAx.alphaOff <= 1 && aAx.pageOff <= 1 && aAx.beyond === 0, aAx);
+  check('nothing outside the lasso changes and the rest of the empty area stays empty', aAx.outsideChanged === 0 && aAx.opaqueChanged === 0 && aAx.onOpaque === 0 && restAx.alphaMax === 0, [aAx, restAx]);
+  note('lasso from picture into empty space', { lasso: loopX, kind: sAx.stats.plan.kind, layer: aAx.layer, changed: aAx.changed, opaqueInLasso: aAx.opaqueInside, partialEdgePixels: aAx.partial, alphaOff: aAx.alphaOff, beyond: aAx.beyond, outsideChanged: aAx.outsideChanged, opaqueChanged: aAx.opaqueChanged, restAlphaMax: restAx.alphaMax, stepAtPictureEdge: stepAx });
+  await A.shot('ai-across');
+
+  await A.ev(() => {
+    const d = window.T.grad(600, 450, 'Feathered hole');
+    window.T.keep('fh:whole');
+    window.T.cut(d, [[250, 180, 100, 80]]);
+  });
+  await A.settle(300);
+  await A.select([240, 170], [360, 270]);
+  await A.menu(['Select', 'Feather…']);
   await A.settle(200);
-  const tE = await A.ev(() => window.T.log.toasts.length);
+  await A.page.locator('.dialog input.slider').first().evaluate((el) => {
+    el.value = 12;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await A.page.locator('.dialog .btn.primary').click();
+  await A.settle(400);
+  await A.ev(() => window.T.keep('fh'));
+  const sFh0 = await A.state();
+  const rFh = await A.fill();
+  const sFh = await A.state();
+  const aFh = await A.ev(() => window.T.audit('fh', 'fh:whole'));
+  const midFh = await A.ev(() => window.app.api.pixel(300, 220));
+  check('Select ▸ Feather… feathered the selection around the hole', sFh0.last === 'Feather' && sFh0.sel.w > 130, sFh0);
+  check('a feathered selection around a hole fades the fill with the coverage', rFh.out === 'done' && sFh.stats.plan.kind === 'holes' && aFh.partial > 500 && aFh.alphaOff <= 1 && aFh.pageOff <= 1 && midFh[3] === 255, [rFh, aFh, midFh]);
+  check('a feathered fill touches no solid picture and nothing outside the selection', aFh.opaqueChanged === 0 && aFh.onOpaque === 0 && aFh.beyond === 0 && aFh.outsideChanged === 0 && aFh.fillOff <= 12, aFh);
+  note('feathered selection around a hole', { sel: sFh0.sel, kind: sFh.stats.plan.kind, partial: aFh.partial, alphaOff: aFh.alphaOff, pageOff: aFh.pageOff, fillOff: aFh.fillOff, opaqueChanged: aFh.opaqueChanged, middle: midFh });
+  await A.shot('ai-feathered-hole');
+
+  await A.ev(() => {
+    const d = window.T.grad(500, 400, 'Soft edge');
+    window.T.keep('soft:whole');
+    const l = d.layers[0];
+    const g = l.canvas.getContext('2d');
+    g.globalCompositeOperation = 'destination-out';
+    g.filter = 'blur(3px)';
+    g.fillRect(200, 150, 120, 100);
+    g.filter = 'none';
+    g.globalCompositeOperation = 'source-over';
+    l.ver++;
+    d.touch('all');
+    window.T.sel(170, 120, 180, 160);
+    window.T.keep('soft');
+  });
+  await A.settle(300);
+  const rSo = await A.fill();
+  const sSo = await A.state();
+  const aSo = await A.ev(() => window.T.audit('soft', 'soft:whole'));
+  const inSo = await A.ev(() => window.T.region({ x: 170, y: 120, w: 180, h: 160 }));
+  check('a semi-transparent picture edge inside the selection keeps its colour over the fill', rSo.out === 'done' && sSo.stats.plan.kind === 'holes' && aSo.soft > 500 && inSo.alphaMin === 255 && aSo.edgeOff <= 12 && aSo.fillOff <= 12 && aSo.opaqueChanged === 0, [rSo, aSo, inSo]);
+  note('semi-transparent picture edge', { kind: sSo.stats.plan.kind, softPixels: aSo.soft, edgeOff: aSo.edgeOff, fillOff: aSo.fillOff, alphaMin: inSo.alphaMin, opaqueChanged: aSo.opaqueChanged });
+  await A.shot('ai-soft-edge');
+
+  await A.ev(() => {
+    window.T.cut(window.T.rough(600, 450, 'Mixed'), [[250, 180, 100, 80]]);
+    window.T.sel(220, 150, 160, 140);
+    window.T.keep('mixed');
+    window.T.log.what.length = 0;
+  });
+  await A.settle(300);
+  const planMx = await A.ev(() => window.app.api.ai.plan(window.app.doc));
+  const nMx = await A.closed();
+  await A.fillDialog();
+  await A.waitClosed(nMx);
+  const sMx = await A.state();
+  const aMx = await A.ev(() => window.T.audit('mixed'));
+  const whatMx = await A.ev(() => window.T.log.what.slice());
+  check('left to itself AI Fill would fill only the hole in that selection', planMx.kind === 'holes' && JSON.stringify(planMx.box) === JSON.stringify({ x: 250, y: 180, w: 100, h: 80 }), planMx);
+  check('Fill… ▸ Content-Aware (AI) replaces everything inside a selection with picture and empty space', sMx.stats.plan.kind === 'replace' && whatMx.join() === REPLACE && JSON.stringify(aMx.layer) === JSON.stringify({ x: 220, y: 150, w: 160, h: 140 }) && aMx.coverOff <= 1 && aMx.onOpaque === 160 * 140 - 8000 && aMx.opaqueChanged > 10000 && aMx.outsideChanged === 0, [sMx.stats.plan.kind, whatMx, aMx]);
+  note('Fill… Content-Aware on picture and empty space', { auto: planMx.kind, autoBox: planMx.box, kind: sMx.stats.plan.kind, layer: aMx.layer, coverOff: aMx.coverOff, pictureReplaced: aMx.onOpaque, opaqueChanged: aMx.opaqueChanged, outsideChanged: aMx.outsideChanged });
+  await A.shot('ai-mixed-replace');
+
+  await A.ev(() => {
+    window.T.rough(600, 450, 'Solid');
+    window.T.sel(220, 150, 160, 140);
+  });
+  await A.settle(300);
+  const sSd0 = await A.state();
+  const tSd = (await A.toasts()).length;
+  const rSd = await A.fill({ mode: 'holes' });
+  const sSd = await A.state();
+  const toastsSd = await A.toasts(tSd);
+  check('{mode: holes} on a solid selection says nothing is empty', rSd.out === 'solid' && toastsSd.join('|') === NOT_EMPTY && sSd.hist === sSd0.hist && sSd.layers.length === 1 && sSd.stats.runs === sSd0.stats.runs, [rSd, toastsSd, sSd]);
+  await A.ev(() => window.T.sel(700, 500, 50, 50));
+  const tOut = (await A.toasts()).length;
+  const rOut = await A.fill();
+  const toastsOut = await A.toasts(tOut);
+  note('forced holes on solid, and a selection outside the page', { solid: rSd.out, outside: rOut.out });
+  check('a selection outside the page is called empty', rOut.out === 'nothing' && toastsOut.join('|') === EMPTY_SEL && (await A.state()).hist === sSd0.hist, [rOut, toastsOut]);
+
+  await A.ev(() => {
+    const d = window.T.grad(600, 450, 'Visible');
+    window.T.add('Sheer', (g) => { g.fillStyle = 'rgb(30,60,200)'; g.fillRect(360, 230, 120, 120); }, { opacity: 0.5 });
+    window.T.add('Hidden', (g) => { g.fillStyle = 'rgb(255,0,0)'; g.fillRect(80, 80, 120, 120); }, { visible: false });
+    window.T.keep('vis:whole');
+    window.T.cut(d, [[100, 100, 80, 80], [380, 250, 80, 80]]);
+    window.T.activate('Background');
+    window.T.sel(60, 60, 440, 310);
+    window.T.keep('vis');
+  });
+  await A.settle(300);
+  const wasVis = await A.ev(() => [window.app.api.pixel(140, 140), window.app.api.pixel(420, 290)]);
+  const rVis = await A.fill();
+  const sVis = await A.state();
+  const aVis = await A.ev(() => window.T.audit('vis', 'vis:whole'));
+  const inVis = await A.ev(() => window.T.region({ x: 60, y: 60, w: 440, h: 310 }));
+  const nowVis = await A.ev(() => [window.app.api.pixel(140, 140), window.app.api.pixel(420, 290), window.app.api.pixel(370, 290), window.app.api.pixel(470, 290)]);
+  const kVis = wasVis[1][3] / 255;
+  const offVis = Math.max(...[0, 1, 2].map((k) => Math.abs(nowVis[1][k] - (wasVis[1][k] * kVis + ((nowVis[2][k] + nowVis[3][k]) / 2) * (1 - kVis)))));
+  check('a hidden layer over a hole does not count: the hole is filled from the picture', rVis.out === 'done' && sVis.stats.plan.kind === 'holes' && wasVis[0][3] === 0 && nowVis[0][3] === 255 && nowVis[0][0] < 200 && aVis.fillOff <= 12, [rVis, wasVis, nowVis, aVis]);
+  check('a half-opaque layer over a hole keeps its colour over the fill of what is visible around it', wasVis[1][3] > 120 && wasVis[1][3] < 136 && nowVis[1][3] === 255 && offVis <= 12 && inVis.alphaMin === 255, [wasVis, nowVis, offVis, aVis, inVis]);
+  console.log('info half-opaque layer over a hole: ' + JSON.stringify({ was: wasVis[1], now: nowVis[1], around: [nowVis[2], nowVis[3]], offFromRule: offVis, offFromLayeredTruth: aVis.edgeOff }));
+  check('with hidden and half-opaque layers the solid picture stays bit-identical', aVis.opaqueChanged === 0 && aVis.onOpaque === 0 && aVis.outsideChanged === 0 && sVis.layers.join() === 'Background,Sheer,Hidden,AI Fill', [aVis, sVis.layers]);
+  note('hidden and half-opaque layers', { kind: sVis.stats.plan.kind, hiddenHole: [wasVis[0], nowVis[0]], fillOff: aVis.fillOff, opaqueChanged: aVis.opaqueChanged, alphaMin: inVis.alphaMin });
+  await A.shot('ai-visible');
+
+  await A.ev(() => {
+    window.app.api.newDoc({ w: 300, h: 200, dpi: 72, bg: 'transparent', name: 'Empty' });
+    window.app.api.run('selAll');
+  });
+  await A.settle(200);
+  const sE0 = await A.state();
+  const tE = (await A.toasts()).length;
   const rE = await A.fill();
-  const toastsE0 = await A.ev((n) => window.T.log.toasts.slice(n), tE);
-  check('an empty page is refused with its own message', rE.out === 'empty' && toastsE0.join('|') === NO_PICTURE && (await A.state()).hist === 0, [rE, toastsE0]);
+  const toastsE0 = await A.toasts(tE);
+  check('an empty page is refused with its own message', rE.out === 'empty' && toastsE0.join('|') === NO_PICTURE && (await A.state()).hist === sE0.hist, [rE, toastsE0]);
   await A.ev(() => {
     const d = window.T.grad(400, 300, 'Sheer');
     const l = d.layers[0];
@@ -744,6 +1033,7 @@ function inPage() {
     l.ver++;
     d.touch('all');
     window.T.keep('sheer');
+    window.app.api.run('selAll');
   });
   await A.settle(200);
   const rS = await A.fill();
@@ -769,6 +1059,18 @@ function inPage() {
   await A.settle(300);
   const sT2 = await A.state();
   check('undoing both steps leaves a clean document', sT2.layers.join() === 'Background' && sT2.hi === sT0.hi && sT2.modal === false, sT2);
+  await A.ev(() => { window.app.api.run('deselect'); });
+  await A.settle(200);
+  await A.page.mouse.click(at.x, at.y);
+  await A.settle(300);
+  await A.page.keyboard.type('Yo');
+  await A.settle(200);
+  const sM0 = await A.state();
+  const rM = await A.ev(() => window.app.api.run('aiFill'));
+  const sM = await A.state();
+  check('without a selection a text edit stays open and nothing is committed', rM === 'select' && sM0.modal === true && sM.modal === true && sM.hi === sM0.hi && sM.hist === sM0.hist && sM.sel === null, [rM, sM0, sM]);
+  await A.page.keyboard.press('Escape');
+  await A.settle(200);
   await A.ev(() => window.app.api.setTool('marquee'));
 
   await A.ev(() => {
@@ -779,6 +1081,7 @@ function inPage() {
     l.ver++;
     d.touch('all');
     window.T.keep('holes');
+    window.app.api.run('selAll');
   });
   await A.settle(500);
   const rO = await A.fill();
@@ -790,6 +1093,7 @@ function inPage() {
   check('the small holes are opaque and textured like the page', cO.alphaMin === 255 && cO.opaqueChanged === 0 && mO.detailIn >= 0.5 * mO.detailOut, [cO, mO]);
   check('the page stays responsive while it fills', rO.gap < 400, rO);
   times.fiveHoles = rO.ms;
+  note('Select All on the yearbook page', { kind: planO.kind, took: planO.took, ms: rO.ms, gap: rO.gap });
   times.longestPause = rO.gap;
 
   await A.page.keyboard.press('Control+z');
@@ -915,6 +1219,7 @@ function inPage() {
   await A.ev(() => window.T.texture('Texture'));
   await A.settle(400);
   await A.shot('ai-texture-before');
+  await A.all();
   const rT = await A.fill();
   await A.settle(300);
   await A.shot('ai-texture-after');
@@ -925,6 +1230,7 @@ function inPage() {
   await A.ev(() => window.T.leafy('Leafy Page'));
   await A.settle(600);
   await A.shot('ai-leafy-before');
+  await A.all();
   const rY = await A.fill();
   await A.settle(400);
   await A.shot('ai-leafy-after');
@@ -938,10 +1244,12 @@ function inPage() {
     return d.layers.length;
   });
   await A.settle(300);
-  const tW = await A.ev(() => window.T.log.toasts.length);
+  const tW = (await A.toasts()).length;
+  await A.all();
+  const sW0 = await A.state();
   const rWp = await A.fill();
-  const toastsW = await A.ev((n) => window.T.log.toasts.slice(n), tW);
-  check('a frame on a white page asks for a selection', rWp.out === 'nothing' && toastsW.join('|') === NOTHING, [rWp, toastsW]);
+  const toastsW = await A.toasts(tW);
+  check('Select All on a page with nothing empty has nothing to continue from', rWp.out === 'blind' && toastsW.join('|') === NO_AROUND && (await A.state()).hist === sW0.hist, [rWp, toastsW]);
   await A.page.close();
 
   const B = await open(iso.url);

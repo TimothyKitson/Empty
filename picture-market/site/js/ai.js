@@ -22,6 +22,8 @@ const CALM_R = 12;
 const CALM_MIN = 8;
 const MAX_COMPS = 32;
 const KNOWN = 240;
+const CLEAR = 128;
+const PICKED = 128;
 const TRUST_LOW = 0.1;
 const TRUST_HIGH = 0.26;
 const RING = 40;
@@ -47,7 +49,9 @@ const BAND_PX = 1200000;
 const LAYER_NAME = 'AI Fill';
 
 const TEXT = {
-  nothing: 'Nothing is empty on this page. Select the area you want filled in first.',
+  select: 'Select the area to fill first: draw around it with the Lasso, then choose AI Fill again.',
+  nothing: 'The selection is empty. Draw around the area you want filled, then choose AI Fill again.',
+  solid: 'Nothing is empty inside the selection.',
   blind: 'There is no solid picture around that area for the AI to continue from.',
   empty: 'There is no solid picture on this page for the AI to continue from.',
   download: 'The AI model could not be downloaded. Check the internet connection and try again.',
@@ -55,8 +59,8 @@ const TEXT = {
   memory: 'There was not enough memory to run the AI model. Close other tabs and try again.',
   changed: 'The picture changed while the AI was working, so nothing was filled in.',
   failed: 'The AI fill did not work this time. Try again.',
-  whatSel: 'Filling the selected area',
-  whatPage: 'Filling the empty areas of the page',
+  holes: 'Filling the empty space inside the selection',
+  replace: 'Replacing what is inside the selection',
   look: 'Looking at the picture…',
   ready: 'Getting the AI ready…',
   first: 'Getting the AI ready — 43 MB, first time only',
@@ -475,33 +479,61 @@ async function flatDoc(d, area, job) {
   return r;
 }
 
+async function coverage(sel, area, job) {
+  const r = readable(area.w, area.h);
+  r.g.drawImage(sel, -area.x, -area.y);
+  const cov = new Uint8Array(area.w * area.h);
+  await rows(job, 0, area.h, area.w, (y, n) => {
+    const s = r.g.getImageData(0, y, area.w, n).data;
+    for (let q = y * area.w, p = 3; p < s.length; q++, p += 4) cov[q] = s[p];
+  });
+  r.c.width = 1;
+  r.c.height = 1;
+  return cov;
+}
+
+function grow(b, x, y) {
+  if (x < b.x) b.x = x;
+  if (x > b.x1) b.x1 = x;
+  if (y < b.y) b.y = y;
+  if (y > b.y1) b.y1 = y;
+}
+
 async function scan(P, job) {
-  const { d, G, area } = P;
-  const { cell, gw, gh } = G;
+  const { d, G, area, cov } = P;
+  const { cell, gw, gh, n } = G;
   const col = new Int32Array(area.w);
   for (let i = 0; i < area.w; i++) col[i] = ((area.x + i) / cell) | 0;
-  const t = { x: d.w, y: d.h, x1: -1, y1: -1 };
-  const s = { x: d.w, y: d.h, x1: -1, y1: -1 };
-  const grow = (b, x, y) => {
-    if (x < b.x) b.x = x;
-    if (x > b.x1) b.x1 = x;
-    if (y < b.y) b.y = y;
-    if (y > b.y1) b.y1 = y;
-  };
-  await rows(job, area.y, area.y + area.h, area.w, (y, n) => {
-    const f = P.fg.getImageData(area.x, y, area.w, n).data;
-    const sa = P.selG ? P.selG.getImageData(0, y - area.y, area.w, n).data : null;
-    for (let j = 0, p = 3; j < n; j++) {
+  const none = () => ({ x: d.w, y: d.h, x1: -1, y1: -1 });
+  const all = none();
+  const gap = none();
+  const soft = none();
+  const picked = new Float32Array(n);
+  const hole = new Float32Array(n);
+  const solid = new Float32Array(n);
+  const inside = new Float32Array(n);
+  let clear = false;
+  await rows(job, area.y, area.y + area.h, area.w, (y, m) => {
+    const f = P.fg.getImageData(area.x, y, area.w, m).data;
+    let q = (y - area.y) * area.w;
+    for (let j = 0, p = 3; j < m; j++) {
       const row = (((y + j) / cell) | 0) * gw;
-      for (let i = 0; i < area.w; i++, p += 4) {
+      for (let i = 0; i < area.w; i++, p += 4, q++) {
         const a = f[p];
-        if (sa ? sa[p] > 0 : a < KNOWN) {
-          G.tgt[row + col[i]]++;
-          grow(t, area.x + i, y + j);
-        } else if (a >= KNOWN) {
-          G.known[row + col[i]]++;
+        const c = cov[q];
+        const k = row + col[i];
+        if (a >= KNOWN) {
+          solid[k]++;
+          if (c) inside[k]++;
         }
-        if (!sa && a < 255) grow(s, area.x + i, y + j);
+        if (!c) continue;
+        picked[k]++;
+        grow(all, area.x + i, y + j);
+        if (a < 255) grow(soft, area.x + i, y + j);
+        if (a >= KNOWN) continue;
+        hole[k]++;
+        grow(gap, area.x + i, y + j);
+        if (a < CLEAR && c >= PICKED) clear = true;
       }
     }
   });
@@ -513,7 +545,14 @@ async function scan(P, job) {
     }
   }
   const rect = (b) => (b.x1 < 0 ? null : { x: b.x, y: b.y, w: b.x1 - b.x + 1, h: b.y1 - b.y + 1 });
-  return { target: rect(t), soft: rect(s) };
+  return { picked, hole, solid, inside, clear, all: rect(all), gap: rect(gap), soft: rect(soft) };
+}
+
+function aimAt(P, found) {
+  const { G } = P;
+  G.tgt.set(P.holes ? found.hole : found.picked);
+  for (let i = 0; i < G.n; i++) G.known[i] = found.solid[i] - (P.holes ? 0 : found.inside[i]);
+  return P.holes ? found.gap : found.all;
 }
 
 function spread(src, gw, gh, r) {
@@ -629,13 +668,15 @@ async function study(P, job) {
     const hh = y1 - y0;
     if (w < 3 || hh < 3) continue;
     const f = P.fg.getImageData(x0, y0, w, hh).data;
-    const s = P.selG ? P.selG.getImageData(x0 - area.x, y0 - area.y, w, hh).data : null;
     const ok = new Uint8Array(w * hh);
     const lum = new Float32Array(w * hh);
     const busy = new Uint8Array(w * hh);
-    for (let q = 0, p = 0; q < ok.length; q++, p += 4) {
-      ok[q] = f[p + 3] >= KNOWN && !(s && s[p + 3] > 0) ? 1 : 0;
-      lum[q] = 0.299 * f[p] + 0.587 * f[p + 1] + 0.114 * f[p + 2];
+    for (let j = 0, q = 0, p = 0; j < hh; j++) {
+      let s = (y0 - area.y + j) * area.w + x0 - area.x;
+      for (let i = 0; i < w; i++, q++, p += 4, s++) {
+        ok[q] = f[p + 3] >= KNOWN && (P.holes || !P.cov[s]) ? 1 : 0;
+        lum[q] = 0.299 * f[p] + 0.587 * f[p + 1] + 0.114 * f[p + 2];
+      }
     }
     for (let y = 1; y < hh - 1; y++) {
       for (let x = 1, q = y * w + 1; x < w - 1; x++, q++) {
@@ -999,17 +1040,14 @@ function readBase(P, c, pad) {
   t.g.imageSmoothingQuality = 'high';
   t.g.drawImage(P.flat, crop.x, crop.y, crop.w, crop.h, 0, 0, bw, bh);
   const px = t.g.getImageData(0, 0, bw, bh).data;
-  let sa = null;
-  if (P.sel) {
-    t.g.clearRect(0, 0, bw, bh);
-    t.g.drawImage(P.sel, crop.x, crop.y, crop.w, crop.h, 0, 0, bw, bh);
-    sa = t.g.getImageData(0, 0, bw, bh).data;
-  }
+  t.g.clearRect(0, 0, bw, bh);
+  t.g.drawImage(P.sel, crop.x, crop.y, crop.w, crop.h, 0, 0, bw, bh);
+  const sa = t.g.getImageData(0, 0, bw, bh).data;
   const lim = bw < crop.w || bh < crop.h ? 255 : KNOWN;
   let unk = new Uint8Array(bw * bh);
   let aim = new Uint8Array(bw * bh);
   for (let i = 0, p = 3; i < unk.length; i++, p += 4) {
-    aim[i] = sa ? (sa[p] > 0 ? 1 : 0) : px[p] < lim ? 1 : 0;
+    aim[i] = sa[p] > 0 && (!P.holes || px[p] < lim) ? 1 : 0;
     unk[i] = aim[i] || px[p] < lim ? 1 : 0;
   }
   if (lim === 255) {
@@ -1157,29 +1195,24 @@ function labelRows(P, c, x, y, w, n) {
   return out;
 }
 
-function targetRows(P, x, y, w, n) {
-  if (P.selG) return P.selG.getImageData(x - P.area.x, y - P.area.y, w, n).data;
-  return P.fg.getImageData(x, y, w, n).data;
-}
-
 async function paintBase(P, c, job) {
-  const { G, box } = P;
+  const { G, box, area, cov } = P;
   const b = c.box;
   const col = new Int32Array(b.w);
   for (let i = 0; i < b.w; i++) col[i] = ((b.x + i) / G.cell) | 0;
-  const lim = P.selG ? 1 : KNOWN;
   await rows(job, b.y, b.y + b.h, b.w, (y, n) => {
     const rgb = pullRect(P, c.rgb, c.crop, b.x, y, b.w, n);
     const lab = c.lab ? labelRows(P, c, b.x, y, b.w, n) : null;
-    const t = targetRows(P, b.x, y, b.w, n);
+    const t = P.holes ? P.fg.getImageData(b.x, y, b.w, n).data : null;
     const img = P.fill.g.getImageData(b.x - box.x, y - box.y, b.w, n);
     const o = img.data;
     const K = c.pal.length;
     for (let j = 0, p = 0, q = 0; j < n; j++) {
       const row = (((y + j) / G.cell) | 0) * G.gw;
-      for (let i = 0; i < b.w; i++, p += 4, q++) {
+      let s = (y + j - area.y) * area.w + b.x - area.x;
+      for (let i = 0; i < b.w; i++, p += 4, q++, s++) {
         if (G.comp[row + col[i]] !== c.id) continue;
-        if (P.selG ? t[p + 3] < lim : t[p + 3] >= lim) continue;
+        if (!cov[s] || (t && t[p + 3] >= KNOWN)) continue;
         const k = lab ? lab[q] : K;
         if (k < K) {
           o[p] = c.pal[k][0];
@@ -1357,18 +1390,22 @@ async function schedule(P, job) {
   }
 }
 
-async function prepare(d, job) {
-  const sel = d.sel ? d.sel.c : null;
+function areaFor(d, G) {
+  const b = d.sel.b;
+  const sb = clip(d, b.x, b.y, b.x + b.w, b.y + b.h);
+  if (sb.w < 1 || sb.h < 1) return null;
+  const pad = Math.max(384, Math.round(Math.max(sb.w, sb.h) * 1.5));
+  const snap = (v) => Math.floor(v / G.cell) * G.cell;
+  return clip(d, snap(sb.x - pad), snap(sb.y - pad), snap(sb.x + sb.w + pad) + G.cell, snap(sb.y + sb.h + pad) + G.cell);
+}
+
+async function prepare(d, job, want) {
+  if (!d.sel) return { none: 'select' };
+  const sel = d.sel.c;
   const G = makeGrid(d);
-  let area = { x: 0, y: 0, w: d.w, h: d.h };
-  if (sel) {
-    const sb = clip(d, d.sel.b.x, d.sel.b.y, d.sel.b.x + d.sel.b.w, d.sel.b.y + d.sel.b.h);
-    if (sb.w < 1 || sb.h < 1) return { none: 'nothing' };
-    const pad = Math.max(384, Math.round(Math.max(sb.w, sb.h) * 1.5));
-    const snap = (v) => Math.floor(v / G.cell) * G.cell;
-    area = clip(d, snap(sb.x - pad), snap(sb.y - pad), snap(sb.x + sb.w + pad) + G.cell, snap(sb.y + sb.h + pad) + G.cell);
-  }
-  const P = { d, G, sel, area, rev: d.rev, kind: sel ? 'sel' : 'blanks', selG: null, tmp: null, comps: [], wins: [], took: {} };
+  const area = areaFor(d, G);
+  if (!area) return { none: 'nothing' };
+  const P = { d, G, sel, area, rev: d.rev, kind: '', holes: false, cov: null, tmp: null, comps: [], wins: [], took: {} };
   let t0 = performance.now();
   const lap = (name) => {
     const t = performance.now();
@@ -1379,20 +1416,26 @@ async function prepare(d, job) {
   lap('flatten');
   P.flat = flat.c;
   P.fg = flat.g;
-  if (sel) {
-    const r = readable(area.w, area.h);
-    r.g.drawImage(sel, -area.x, -area.y);
-    P.selG = r.g;
-  }
+  P.cov = await coverage(sel, area, job);
   const found = await scan(P, job);
   lap('scan');
-  if (!found.target) return { none: 'nothing' };
+  if (!found.all) return { none: 'nothing' };
+  P.kind = want || (found.clear ? 'holes' : 'replace');
+  P.holes = P.kind === 'holes';
+  if (job.kind) job.kind(P.kind);
+  const target = aimAt(P, found);
+  if (!target) return { none: 'solid' };
   let known = 0;
-  for (let i = 0; i < G.n; i++) known += G.known[i];
-  if (!known) return { none: sel ? 'blind' : 'empty' };
-  P.box = sel ? found.target : found.soft;
+  let solid = 0;
+  for (let i = 0; i < G.n; i++) {
+    known += G.known[i];
+    solid += found.solid[i];
+  }
+  const lost = solid || area.w < d.w || area.h < d.h ? 'blind' : 'empty';
+  if (!known) return { none: lost };
+  P.box = P.holes ? found.soft : target;
   P.fill = readable(P.box.w, P.box.h);
-  P.comps = findComps(P, found.target);
+  P.comps = findComps(P, target);
   P.byId = [];
   for (const c of P.comps) P.byId[c.id] = c;
   const S = await study(P, job);
@@ -1405,7 +1448,7 @@ async function prepare(d, job) {
     if (!c.blind) await paintBase(P, c, job);
   }
   lap('base');
-  if (P.comps.every((c) => c.blind)) return { none: sel ? 'blind' : 'empty' };
+  if (P.comps.every((c) => c.blind)) return { none: lost };
   needs(P);
   P.wins = await schedule(P, job);
   lap('plan');
@@ -1417,12 +1460,12 @@ function picture(P, g, r, dw, dh) {
   const fy = r.y - P.box.y;
   g.globalCompositeOperation = 'source-over';
   g.clearRect(0, 0, dw, dh);
-  if (P.sel) {
-    g.drawImage(P.flat, r.x, r.y, r.w, r.h, 0, 0, dw, dh);
+  if (P.holes) {
     g.drawImage(P.fill.c, fx, fy, r.w, r.h, 0, 0, dw, dh);
+    g.drawImage(P.flat, r.x, r.y, r.w, r.h, 0, 0, dw, dh);
   } else {
-    g.drawImage(P.fill.c, fx, fy, r.w, r.h, 0, 0, dw, dh);
     g.drawImage(P.flat, r.x, r.y, r.w, r.h, 0, 0, dw, dh);
+    g.drawImage(P.fill.c, fx, fy, r.w, r.h, 0, 0, dw, dh);
   }
 }
 
@@ -1735,11 +1778,25 @@ async function finish(P, job) {
   for (const c of live) if (c.grain > 0 || (c.lab && c.touched)) await polish(P, c, amp, job);
 }
 
+function under(o, f, p, c) {
+  const a = f[p + 3];
+  if (a === 255 || !c) {
+    o[p + 3] = 0;
+    return;
+  }
+  const k = o[p + 3] ? a / 255 : a >= KNOWN ? 1 : -1;
+  if (k < 0) return;
+  o[p] = f[p] * k + o[p] * (1 - k) + 0.5;
+  o[p + 1] = f[p + 1] * k + o[p + 1] * (1 - k) + 0.5;
+  o[p + 2] = f[p + 2] * k + o[p + 2] * (1 - k) + 0.5;
+  o[p + 3] = c;
+}
+
 async function layerCanvas(P, job) {
-  const { box } = P;
+  const { box, area, cov } = P;
   const out = mk(box.w, box.h);
   const og = cx(out);
-  if (P.sel) {
+  if (!P.holes) {
     og.drawImage(P.fill.c, 0, 0);
     og.globalCompositeOperation = 'destination-in';
     og.drawImage(P.sel, -box.x, -box.y);
@@ -1749,22 +1806,9 @@ async function layerCanvas(P, job) {
     const f = P.fg.getImageData(box.x, y, box.w, n).data;
     const img = P.fill.g.getImageData(0, y - box.y, box.w, n);
     const o = img.data;
-    for (let p = 0; p < o.length; p += 4) {
-      const a = f[p + 3];
-      if (a === 255) {
-        o[p + 3] = 0;
-      } else if (o[p + 3]) {
-        const k = a / 255;
-        o[p] = f[p] * k + o[p] * (1 - k) + 0.5;
-        o[p + 1] = f[p + 1] * k + o[p + 1] * (1 - k) + 0.5;
-        o[p + 2] = f[p + 2] * k + o[p + 2] * (1 - k) + 0.5;
-        o[p + 3] = 255;
-      } else if (a >= KNOWN) {
-        o[p] = f[p];
-        o[p + 1] = f[p + 1];
-        o[p + 2] = f[p + 2];
-        o[p + 3] = 255;
-      }
+    for (let j = 0, p = 0; j < n; j++) {
+      let s = (y + j - area.y) * area.w + box.x - area.x;
+      for (let i = 0; i < box.w; i++, p += 4, s++) under(o, f, p, cov[s]);
     }
     og.putImageData(img, 0, y - box.y);
   });
@@ -1798,11 +1842,14 @@ function summary(P) {
   };
 }
 
-export async function planFill(d) {
-  return summary(await prepare(d, { cancelled: false, tick: performance.now() }));
+const modeOf = (opts) => (opts && (opts.mode === 'holes' || opts.mode === 'replace') ? opts.mode : '');
+
+export async function planFill(d, opts) {
+  return summary(await prepare(d, { cancelled: false, tick: performance.now() }, modeOf(opts)));
 }
 
 function progressDialog(what, onCancel) {
+  const line = h('div.aiwhat', { text: what || '\u00a0' });
   const text = h('span.aitext', { text: TEXT.look });
   const pct = h('span.aipct');
   const fill = h('i');
@@ -1816,11 +1863,14 @@ function progressDialog(what, onCancel) {
   };
   back.append(h('div.dialog.aidialog', null,
     h('div.dhead', { text: LAYER_NAME }),
-    h('div.dbody', null, h('div.aiwhat', { text: what }), h('div.aistat', null, text, pct), bar),
+    h('div.dbody', null, line, h('div.aistat', null, text, pct), bar),
     h('div.dfoot', null, h('button.btn', { text: 'Cancel', onclick: () => onCancel() }))));
   document.body.append(back);
   document.addEventListener('keydown', key, true);
   return {
+    what(v) {
+      line.textContent = v;
+    },
     set(stage, frac, part) {
       const loading = stage === 'download';
       const count = part && part[1] > 1 ? ' ' + part[0] + ' of ' + part[1] : '';
@@ -1848,12 +1898,17 @@ const frame = () => new Promise((r) => setTimeout(r, 40));
 
 export async function aiFill(d, opts = {}) {
   if (!d || busy) return 'busy';
+  if (!d.sel) {
+    toast(TEXT.select);
+    return 'select';
+  }
   busy = true;
+  const want = modeOf(opts);
   let stop = null;
   const cancelled = new Promise((r) => { stop = r; });
   const ctl = typeof AbortController === 'function' ? new AbortController() : null;
-  const job = { cancelled: false, signal: ctl ? ctl.signal : undefined, transport: null, part: null, progress: () => {}, tick: performance.now() };
-  const dlg = progressDialog(d.sel ? TEXT.whatSel : TEXT.whatPage, () => {
+  const job = { cancelled: false, signal: ctl ? ctl.signal : undefined, transport: null, part: null, progress: () => {}, kind: null, tick: performance.now() };
+  const dlg = progressDialog(want ? TEXT[want] : '', () => {
     if (job.cancelled) return;
     job.cancelled = true;
     if (ctl) ctl.abort();
@@ -1866,10 +1921,11 @@ export async function aiFill(d, opts = {}) {
   job.progress = (stage, frac) => {
     if (!job.cancelled) dlg.set(stage, frac, job.part);
   };
+  job.kind = (kind) => dlg.what(TEXT[kind]);
   const work = (async () => {
     await frame();
     job.tick = performance.now();
-    const P = await prepare(d, job);
+    const P = await prepare(d, job, want);
     if (P.none) return P.none;
     ai.stats.plan = summary(P);
     for (let i = 0; i < P.wins.length; i++) {

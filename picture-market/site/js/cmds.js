@@ -588,7 +588,7 @@ function fillWith(color, opacity = 1, name = 'Fill') {
 }
 function runAiFill(opts) {
   if (!doc()) return undefined;
-  if (app.modal) endModal(true);
+  if (app.modal && doc().sel) endModal(true);
   return aiFill(doc(), opts);
 }
 async function fillDialog() {
@@ -596,7 +596,7 @@ async function fillDialog() {
   const ok = await dialog('Fill', form([S('use', 'Contents', [['fg', 'Foreground Color'], ['bg', 'Background Color'], ['color', 'Color…'], ['ai', 'Content-Aware (AI)'], ['black', 'Black'], ['gray', '50% Gray'], ['white', 'White']], 'fg'), R('opacity', 'Opacity', 1, 100, 100)], v, () => {}), undefined, { width: 320 });
   if (!ok) return;
   if (v.use === 'ai') {
-    await runAiFill({ opacity: v.opacity / 100 });
+    await runAiFill({ opacity: v.opacity / 100, mode: 'replace' });
     return;
   }
   let c = app.fg;

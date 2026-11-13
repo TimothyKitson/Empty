@@ -5,3 +5,5 @@ node_modules/
 picture-market/dev/shots/
 picture-market/site/ai/
 picture-market/dist/*.zip
+picture-market/dev/fill-v1/
+picture-market/dev/fixtures/
