@@ -6,11 +6,9 @@
   "scripts": {
     "serve": "node dev/serve.js",
     "test": "node dev/smoke.js && node dev/smoke2.js && node dev/smoke3.js && node dev/smoke4.js && node dev/smoke5.js && node dev/smoke6.js && node dev/smoke7.js",
-    "build": "node dev/build.js",
-    "fetch-ai": "node dev/fetch-ai.js"
+    "build": "node dev/build.js"
   },
   "devDependencies": {
-    "esbuild": "0.28.2",
-    "onnxruntime-web": "1.31.1"
+    "esbuild": "0.28.2"
   }
 }

@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const esbuild = require('esbuild');
-const { fetchAi } = require('./fetch-ai');
 
 const ROOT = path.resolve(__dirname, '..');
 const SITE = path.join(ROOT, 'site');
@@ -65,15 +64,6 @@ function zip(entries) {
   return Buffer.concat([...parts, ...central, end]);
 }
 
-const HEADERS = [
-  '/*',
-  '  Cross-Origin-Opener-Policy: same-origin',
-  '  Cross-Origin-Embedder-Policy: credentialless',
-  '/ai/*',
-  '  Cache-Control: public, max-age=31536000, immutable',
-  ''
-].join('\n');
-
 async function build() {
   const html = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
   const result = await esbuild.build({
@@ -106,12 +96,9 @@ async function build() {
   fs.mkdirSync(DIST, { recursive: true });
   fs.writeFileSync(path.join(DIST, 'picture-market.html'), out);
   const licenses = fs.readFileSync(path.join(SITE, 'vendor', 'LICENSES.txt'));
-  const ai = await fetchAi((m) => console.log(m));
   const entries = [
     { name: 'index.html', data: Buffer.from(out, 'utf8') },
-    { name: 'LICENSES.txt', data: licenses },
-    { name: '_headers', data: Buffer.from(HEADERS, 'utf8') },
-    ...ai.map((e) => ({ name: 'ai/' + e.name, data: fs.readFileSync(e.file), store: e.name.endsWith('.onnx') }))
+    { name: 'LICENSES.txt', data: licenses }
   ];
   fs.writeFileSync(path.join(DIST, 'picture-market-netlify.zip'), zip(entries));
   const kb = (n) => (n / 1024).toFixed(0) + ' KB';
